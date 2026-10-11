@@ -99,16 +99,11 @@ sudo systemctl start broxy4g
   per-dongle 3proxy containers through the host Docker daemon
   (`/var/run/docker.sock` is mounted into the container). Without it, no proxy
   can ever be started.
-- The host directory must exist before starting the container:
+- The host data directory must exist, and the API password must be provided in
+  the environment (never hardcode it in `docker-compose.yml`):
 
 ```bash
 sudo mkdir -p /var/lib/broxy4g
-```
-
-- The API password is mandatory and must be provided in the environment
-  (never hardcode it in `docker-compose.yml`):
-
-```bash
 export BROXY4G_API_PASSWORD='a-long-random-password'
 ```
 
@@ -136,11 +131,10 @@ Temporary failure resolving 'deb.debian.org'
 E: Unable to locate package modemmanager
 ```
 
-**Cause:** the build container has no usable DNS. On hosts using
-systemd-resolved (Ubuntu, Raspberry Pi OS), the DNS server visible inside the
-build container (typically the `127.0.0.53` stub, which does not exist inside
-the container) cannot resolve anything, so `apt-get update` never reaches
-`deb.debian.org`. This is a host-side DNS problem, not a repository problem.
+**Cause:** the build container has no usable DNS — a host-side problem, not a
+repository problem. On systemd-resolved hosts (Ubuntu, Raspberry Pi OS) the
+container inherits the `127.0.0.53` stub, unreachable inside the container, so
+`apt-get update` never reaches `deb.debian.org`.
 
 Diagnose on the host:
 
@@ -152,19 +146,12 @@ docker run --rm alpine:3.20 nslookup deb.debian.org
 
 Solutions, in order of preference:
 
-1. Build with the host network stack. This is already configured in
-   `docker-compose.yml` via `build.network: host`, so `docker compose build`
-   should work as-is. With plain `docker build`, pass the flag manually:
-
-   ```bash
-   docker build --network=host -t broxy4g:local .
-   ```
-
-2. If the host resolves fine but Docker's built-in resolver does not, pin a
-   public DNS server in the daemon config `/etc/docker/daemon.json`:
+1. Pin a working DNS server for the Docker daemon. Find the resolver your host
+   actually uses (`resolvectl status`, or `nmcli dev show | grep DNS`) and put
+   its IP in `/etc/docker/daemon.json`:
 
    ```json
-   {"dns": ["1.1.1.1", "9.9.9.9"]}
+   {"dns": ["192.168.1.1", "1.1.1.1"]}
    ```
 
    then restart the daemon:
@@ -172,6 +159,24 @@ Solutions, in order of preference:
    ```bash
    sudo systemctl restart docker
    ```
+
+   This fixes `docker compose build` permanently. Note that `127.0.0.53`
+   (systemd-resolved stub) is **not** usable here: inside a container it points
+   to the container's own loopback.
+
+2. Build once with the host network stack, using plain `docker build` (the
+   explicit flag grants the privilege buildx requires):
+
+   ```bash
+   docker build --network=host -t broxy4g:local .
+   docker compose up -d
+   ```
+
+   Do **not** add `build.network: host` to `docker-compose.yml` to achieve this:
+   `docker compose build` would then fail with
+   `additional privileges requested: pass "--allow=network.host"`, because
+   buildx/Bake requires an explicit opt-in that needs host-side builder setup
+   (`docker buildx create --allow-insecure-entitlement network.host`).
 
 3. If the host itself has no working DNS/Internet access, build the image on
    another machine and transfer it:
@@ -186,25 +191,22 @@ Solutions, in order of preference:
 
 ### Manual Docker Run
 
+`docker-compose.yml` is the source of truth; the equivalent one-off command is:
+
 ```bash
-docker run -d \
-  --name broxy4g \
-  --privileged \
-  --network host \
+docker run -d --name broxy4g --privileged --network host \
   -v /var/lib/broxy4g:/var/lib/broxy4g \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v /run/dbus:/run/dbus \
-  -e BROXY4G_API_USER=admin \
   -e BROXY4G_API_PASSWORD="$BROXY4G_API_PASSWORD" \
   -e BROXY4G_DB_PATH=/var/lib/broxy4g/broxy4g.db \
   -e BROXY4G_DATA_DIR=/var/lib/broxy4g/proxies \
-  -e BROXY4G_FRONTEND_DIST=/opt/broxy4g/frontend/dist \
-  -e BROXY4G_HOST=0.0.0.0 \
-  -e BROXY4G_PORT=8080 \
   -e HOME=/var/lib/broxy4g \
-  --restart unless-stopped \
-  broxy4g:local
+  --restart unless-stopped broxy4g:local
 ```
+
+(`BROXY4G_HOST`, `BROXY4G_PORT` and `BROXY4G_FRONTEND_DIST` already have the
+right defaults baked into the image.)
 
 ### ARM64 / Raspberry Pi
 
