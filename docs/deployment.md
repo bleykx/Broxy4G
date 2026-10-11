@@ -154,15 +154,9 @@ Solutions, in order of preference:
    {"dns": ["192.168.1.1", "1.1.1.1"]}
    ```
 
-   then restart the daemon:
-
-   ```bash
-   sudo systemctl restart docker
-   ```
-
-   This fixes `docker compose build` permanently. Note that `127.0.0.53`
-   (systemd-resolved stub) is **not** usable here: inside a container it points
-   to the container's own loopback.
+   then `sudo systemctl restart docker`. This fixes `docker compose build`
+   permanently. Note that `127.0.0.53` (systemd-resolved stub) is **not** usable
+   here: inside a container it points to the container's own loopback.
 
 2. Build once with the host network stack, using plain `docker build` (the
    explicit flag grants the privilege buildx requires):
