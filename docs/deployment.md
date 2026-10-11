@@ -169,8 +169,11 @@ Solutions, in order of preference:
 
    ```bash
    docker build --network=host -t broxy4g:local .
-   docker compose up -d
+   docker compose up -d --no-build
    ```
+
+   (`--no-build` prevents compose from retrying the failing build and reuses
+   the image you just built.)
 
    Do **not** add `build.network: host` to `docker-compose.yml` to achieve this:
    `docker compose build` would then fail with
