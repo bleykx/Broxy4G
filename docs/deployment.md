@@ -127,6 +127,63 @@ The container runs `network_mode: host` (nftables, `ip rule` and the per-dongle
 routing tables must target the host network namespace). It therefore binds
 `0.0.0.0:8080` directly on the host; no `ports:` mapping exists or is needed.
 
+### Build fails with "Temporary failure resolving"
+
+During `docker compose build`, the image build fails with:
+
+```text
+Temporary failure resolving 'deb.debian.org'
+E: Unable to locate package modemmanager
+```
+
+**Cause:** the build container has no usable DNS. On hosts using
+systemd-resolved (Ubuntu, Raspberry Pi OS), the DNS server visible inside the
+build container (typically the `127.0.0.53` stub, which does not exist inside
+the container) cannot resolve anything, so `apt-get update` never reaches
+`deb.debian.org`. This is a host-side DNS problem, not a repository problem.
+
+Diagnose on the host:
+
+```bash
+getent hosts deb.debian.org
+cat /etc/resolv.conf
+docker run --rm alpine:3.20 nslookup deb.debian.org
+```
+
+Solutions, in order of preference:
+
+1. Build with the host network stack. This is already configured in
+   `docker-compose.yml` via `build.network: host`, so `docker compose build`
+   should work as-is. With plain `docker build`, pass the flag manually:
+
+   ```bash
+   docker build --network=host -t broxy4g:local .
+   ```
+
+2. If the host resolves fine but Docker's built-in resolver does not, pin a
+   public DNS server in the daemon config `/etc/docker/daemon.json`:
+
+   ```json
+   {"dns": ["1.1.1.1", "9.9.9.9"]}
+   ```
+
+   then restart the daemon:
+
+   ```bash
+   sudo systemctl restart docker
+   ```
+
+3. If the host itself has no working DNS/Internet access, build the image on
+   another machine and transfer it:
+
+   ```bash
+   docker save broxy4g:local | ssh <pi> docker load
+   ```
+
+> **Warning:** also check for residual nftables rulesets from a previous
+> Broxy4G run: a leftover rule can break Docker's internal forwarding/DNS
+> (`sudo nft list ruleset`, and `sudo systemctl restart docker` if needed).
+
 ### Manual Docker Run
 
 ```bash

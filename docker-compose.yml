@@ -1,6 +1,11 @@
 services:
   broxy4g:
-    build: .
+    build:
+      context: .
+      # Build steps use the host network stack: Docker's internal DNS fails to
+      # resolve deb.debian.org on hosts using systemd-resolved (Raspberry Pi,
+      # Ubuntu), which breaks `apt-get update` in the image build.
+      network: host
     image: broxy4g:local
     container_name: broxy4g
     # Required: nft, `ip rule fwmark` and per-dongle routing tables must be
