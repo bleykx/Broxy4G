@@ -1,0 +1,115 @@
+# Broxy4G — règles d'exclusion Git
+# Structure : projet Python (layout src/), API FastAPI, frontend Vite/React/TS,
+# déploiement Docker/systemd. Voir docs/ et AGENTS.md.
+
+# ---------------------------------------------------------------------------
+# Python — bytecode, builds, environnements virtuels
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+
+# Environnements virtuels (le projet se travaille en venv)
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ---------------------------------------------------------------------------
+# Outils Python — caches et rapports
+# ---------------------------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit*.xml
+report*.xml
+
+# ---------------------------------------------------------------------------
+# Données d'exécution de l'application
+# Base SQLite, journaux, PID et répertoires locaux.
+# NOTE : ancré à la racine pour ne PAS exclure src/broxy4g/data/ (serviceproviders.xml).
+# ---------------------------------------------------------------------------
+/data/
+/instance/
+/var/
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+*.pid
+*.log
+
+# ---------------------------------------------------------------------------
+# Secrets et configuration locale
+# Ne jamais committer PIN, mots de passe, jetons ou secrets (AGENTS.md).
+# Les fichiers *.example restent versionnés.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.env
+!*.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ---------------------------------------------------------------------------
+# Frontend (Node / Vite / TypeScript)
+# Le lockfile (package-lock.json) est versionné volontairement.
+# ---------------------------------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/.vite/
+.vite/
+.eslintcache
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---------------------------------------------------------------------------
+# Artefacts de QA / navigateur (Playwright)
+# ---------------------------------------------------------------------------
+.playwright-mcp/
+playwright-report/
+test-results/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+
+# ---------------------------------------------------------------------------
+# Éditeurs et OS
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

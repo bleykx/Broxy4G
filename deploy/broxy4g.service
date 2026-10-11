@@ -1,0 +1,24 @@
+[Unit]
+Description=Broxy4G - 4G/5G Dongle Manager
+After=network.target ModemManager.service NetworkManager.service docker.service
+Wants=ModemManager.service NetworkManager.service docker.service
+
+[Service]
+Type=simple
+User=broxy4g
+Group=broxy4g
+EnvironmentFile=/etc/broxy4g/broxy4g.env
+Environment=HOME=/var/lib/broxy4g
+ExecStart=/opt/broxy4g/.venv/bin/python -m broxy4g.main
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/broxy4g
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+SupplementaryGroups=docker
+
+[Install]
+WantedBy=multi-user.target

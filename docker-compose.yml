@@ -1,0 +1,40 @@
+services:
+  broxy4g:
+    build: .
+    image: broxy4g:local
+    container_name: broxy4g
+    # Required: nft, `ip rule fwmark` and per-dongle routing tables must be
+    # applied in the HOST network namespace. With host networking the app
+    # binds 0.0.0.0:8080 directly, so no `ports:` mapping is defined (it is
+    # invalid with network_mode: host anyway).
+    network_mode: host
+    # Required: CAP_NET_ADMIN/CAP_NET_RAW for nftables and routing, plus
+    # unfiltered access to the host Docker socket (the app drives 3proxy
+    # containers) and to /sys + the system D-Bus socket (mmcli).
+    privileged: true
+    volumes:
+      # Identical host/container path: child 3proxy containers mount
+      # /var/lib/broxy4g/proxies/<id>/3proxy.cfg as an absolute host path,
+      # so the data dir must be a bind mount, not a named volume.
+      - /var/lib/broxy4g:/var/lib/broxy4g
+      # Host Docker daemon: 3proxy container lifecycle
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Host system D-Bus: mmcli talks to the host's ModemManager
+      - /run/dbus:/run/dbus
+    environment:
+      - BROXY4G_API_USER=${BROXY4G_API_USER:-admin}
+      # Required: an empty password makes the API return HTTP 500
+      - BROXY4G_API_PASSWORD=${BROXY4G_API_PASSWORD:?BROXY4G_API_PASSWORD must be set}
+      - BROXY4G_DB_PATH=/var/lib/broxy4g/broxy4g.db
+      - BROXY4G_DATA_DIR=/var/lib/broxy4g/proxies
+      - BROXY4G_FRONTEND_DIST=/opt/broxy4g/frontend/dist
+      - BROXY4G_HOST=0.0.0.0
+      - BROXY4G_PORT=8080
+      - HOME=/var/lib/broxy4g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

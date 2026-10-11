@@ -1,0 +1,583 @@
+# Broxy4G API
+
+## Authentication
+
+All API endpoints require HTTP Basic Auth:
+
+```
+Authorization: Basic <base64(user:pass)>
+```
+
+The credentials are configured via the `BROXY4G_API_USER` (default: "admin") and `BROXY4G_API_PASSWORD` environment variables.
+
+## Endpoints
+
+### Health Check
+
+**GET** `/health`
+
+Returns the health status of the application.
+
+**Response**
+```json
+{
+  "status": "healthy"
+}
+```
+
+### Dongle Management
+
+#### List Dongles
+
+**GET** `/api/v1/dongles`
+
+Returns a list of all registered dongles.
+
+**Response**
+```json
+[
+  {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "label": "Dongle 1234",
+    "state": "ONLINE",
+    "interface_name": "wwan0",
+    "public_ip": "192.168.1.100",
+    "signal_quality": 85
+  }
+]
+```
+
+#### Get Dongle Details
+
+**GET** `/api/v1/dongles/{id}`
+
+Returns details for a specific dongle.
+
+**Response**
+```json
+{
+  "id": "123e4567-e89b-12d3-a456-426614174000",
+  "label": "Dongle 1234",
+  "state": "ONLINE",
+  "identity_imei": "123456789012345",
+  "identity_usb_serial": "ABC123",
+  "identity_iccid": "12345678901234567890",
+  "apn": "internet",
+  "apn_auth": "user:password",
+  "route_table_id": 100,
+  "fwmark": 1000,
+  "interface_name": "wwan0",
+  "proxy_id": "123e4567-e89b-12d3-a456-426614174001",
+  "last_error": null,
+  "created_at": "2023-01-01T12:00:00Z",
+  "updated_at": "2023-01-01T12:00:00Z",
+  "metrics": {
+    "signal_quality": {
+      "percent": 48,
+      "rsrp": -92,
+      "rsrq": -11,
+      "sinr": 9,
+      "rssi": -63
+    },
+    "ping": {
+      "host": "8.8.8.8",
+      "packets_sent": 4,
+      "packets_received": 4,
+      "min_ms": 28.1,
+      "avg_ms": 30.4,
+      "max_ms": 33.7
+    },
+    "public_ip": "37.167.72.57",
+    "proxy_health": "healthy"
+  }
+}
+```
+
+> **Signal metrics:** `signal_quality.percent` is always provided by
+> ModemManager. The detailed fields (`rsrp`, `rsrq`, `sinr`, `rssi`) are read
+> from `mmcli --signal-get`; when the values are not yet available they are
+> `null`. The first read for a modem may return `null` detailed fields and
+> transparently enables ModemManager signal polling (`mmcli --signal-setup=30`,
+> requires the PolicyKit `org.freedesktop.ModemManager1.Device.Control` rule
+> installed by `deploy/install.sh`); values appear on the next poll. Modems that
+> do not report detailed signal (e.g. non-LTE) keep `null` detailed fields.
+>
+> **Ping:** latency is measured with ICMP first. When the carrier blocks ICMP
+> over the dongle interface (observed on some mobile APNs), the adapter
+> transparently falls back to TCP-connect timing via `curl --interface`, so
+> `avg_ms` still reflects the real uplink latency.
+>
+> **Error detail:** `last_error` holds the detail of the last failure (exception
+> type and message, or the reason such as an absent modem). It is populated when
+> the dongle is in state `ERROR` and reset to `null` after a successful connect.
+
+#### Get Discovered Dongles
+
+**GET** `/api/v1/dongles/discovered`
+
+Returns a list of dongles that are detected but not yet enrolled.
+
+**Response**
+```json
+[
+  {
+    "identity_imei": "123456789012345",
+    "identity_usb_serial": "ABC123",
+    "identity_iccid": "12345678901234567890",
+    "interface_name": "wwan0",
+    "suggested_label": "Dongle 345",
+    "suggested_apn": "free"
+  }
+]
+```
+
+`suggested_apn` est résolu depuis la base MBPI (mobile-broadband-provider-info) à
+partir de l'IMSI/SIM et de l'opérateur courant. Il vaut `null` si aucun APN
+plausible n'est trouvé. Il ne remplace jamais un APN saisi explicitement.
+
+#### Enroll Dongle
+
+**POST** `/api/v1/dongles`
+
+Enrolls a new dongle.
+
+**Request**
+```json
+{
+  "identity_imei": "123456789012345",
+  "identity_usb_serial": "ABC123",
+  "identity_iccid": "12345678901234567890",
+  "label": "Dongle 1234",
+  "apn": "internet"
+}
+```
+
+**Response**
+```json
+{
+  "id": "123e4567-e89b-12d3-a456-426614174000",
+  "label": "Dongle 1234",
+  "state": "CONFIGURING",
+  "identity_imei": "123456789012345",
+  "identity_usb_serial": "ABC123",
+  "identity_iccid": "12345678901234567890",
+  "apn": "internet",
+  "apn_auth": null,
+  "route_table_id": null,
+  "fwmark": null,
+  "interface_name": null,
+  "proxy_id": null,
+  "last_error": null,
+  "created_at": "2023-01-01T12:00:00Z",
+  "updated_at": "2023-01-01T12:00:00Z",
+  "metrics": null
+}
+```
+
+#### Connect Dongle
+
+**POST** `/api/v1/dongles/{id}/connect`
+
+Connects a dongle to the network.
+
+**Response**
+```json
+{
+  "id": "123e4567-e89b-12d3-a456-426614174000",
+  "state": "CONNECTING"
+}
+```
+
+#### Disconnect Dongle
+
+**POST** `/api/v1/dongles/{id}/disconnect`
+
+Disconnects a dongle from the network.
+
+**Response**
+```json
+{
+  "id": "123e4567-e89b-12d3-a456-426614174000",
+  "state": "OFFLINE"
+}
+```
+
+#### Reset Dongle
+
+**POST** `/api/v1/dongles/{id}/reset`
+
+Resets a dongle. This is an exclusive, bounded operation and is a **recovery**
+action: it is allowed from `ONLINE`, `DEGRADED`, `OFFLINE` and `ERROR`. The
+dongle is moved to `RESETTING` (it stays `RESETTING` until `connect()` moves it
+to `CONNECTING`), then reconnected. The USB re-enumeration can take up to
+~60 s (the modem reappears ~15-50 s after `mmcli --reset`), so the whole
+operation is wrapped in a bounded timeout (`reset_timeout`, default `300 s`);
+the per-dongle lock is always released on completion, timeout or cancellation.
+
+**Response**
+```json
+{
+  "status": "DONE",
+  "message": null
+}
+```
+
+- `status` is one of `DONE`, `ERROR`, `PENDING`.
+- `message` is `null` on success (`DONE`), a fixed explanation on `PENDING`
+  (reset already in progress), and the failure detail when the status is `ERROR`.
+- `PENDING` is returned with HTTP `200` (not `409`) when a reset is already
+  in progress for that dongle: the request was accepted and the reset is
+  being handled by the already-running one.
+- A `ERROR` with a clean business message (no technical jargon) is returned when
+  the dongle is in a state from which a reset is not meaningful — `DISCOVERED`,
+  `UNENROLLED` or `CONFIGURING` (the reset needs an already-enrolled dongle).
+  The message has the exact form `reset impossible dans l'état <STATE>`.
+
+**Modem reset.** The reset performs a real USB modem reset
+(`mmcli -m <path> --reset`) after tearing down the bearer: this is the only
+operation that renews the public IP (disconnect + connect, or even
+`--delete-bearer`, keep it). The dongle is re-enumerated over USB — it
+disappears from ModemManager for a while (typically 15–40 s on a Huawei E3372)
+and comes back under a **new path**, possibly with a **renamed interface**; it
+is found again by its hardware identity (IMEI). If the modem does not come
+back within the bounded wait, the reset returns `ERROR`. On success, the
+per-dongle metrics cache used by the dongle list (public IP, signal quality)
+is refreshed immediately, so the dashboard no longer shows a stale IP.
+
+**CGNAT caveat.** An identical public IP before and after the reset does **not**
+imply a failure: behind a carrier-grade NAT the operator may assign the same
+public IP to two consecutive sessions. The USB modem reset guarantees a fresh
+data session, so an unchanged *public IP* is a valid `DONE`.
+
+#### Reset Dongles (batch)
+
+**POST** `/api/v1/dongles/reset`
+
+Resets several dongles in parallel. Each dongle is reset independently: the
+result of one dongle never affects the others.
+
+**Request**
+```json
+{
+  "ids": [
+    "123e4567-e89b-12d3-a456-426614174000",
+    "123e4567-e89b-12d3-a456-426614174001"
+  ]
+}
+```
+
+- `ids` is a non-empty list of dongle UUIDs. Duplicates are deduplicated while
+  keeping the order of first appearance, so each dongle is reset at most once.
+
+**Response**
+```json
+{
+  "results": [
+    {
+      "dongle_id": "123e4567-e89b-12d3-a456-426614174000",
+      "status": "DONE",
+      "message": null
+    },
+    {
+      "dongle_id": "123e4567-e89b-12d3-a456-426614174001",
+      "status": "PENDING",
+      "message": "reset déjà en cours"
+    }
+  ]
+}
+```
+
+- `results` holds one entry per (unique) requested dongle, in the same order.
+- Each `status` is one of `DONE`, `ERROR`, `PENDING` with the same meaning as
+  the single-dongle reset (`PENDING` = a reset is already in progress for that
+  dongle). `message` is `null` on `DONE`, a fixed explanation on `PENDING`, and
+  the failure detail on `ERROR`.
+- A dongle id that does not exist (or is not in a resettable state) yields its
+  own `ERROR` entry; it does not affect the other entries of the batch.
+
+Returns `422 Unprocessable Entity` if `ids` is empty, and `401 Unauthorized` if
+not authenticated.
+
+#### Update Dongle
+
+**PATCH** `/api/v1/dongles/{id}`
+
+Updates mutable fields of a dongle. Only the provided fields are changed.
+
+**Request**
+```json
+{
+  "label": "Dongle 1234",
+  "apn": "internet",
+  "apn_auth": "pap"
+}
+```
+
+- `label`: new label for the dongle
+- `apn`: new APN
+- `apn_auth`: APN authentication method, one of `"none"`, `"pap"`, `"chap"`
+
+**Response**: the updated dongle (same shape as `GET /api/v1/dongles/{id}`).
+
+Returns `404 Not Found` if the dongle does not exist.
+
+#### Delete Dongle
+
+**DELETE** `/api/v1/dongles/{id}`
+
+Deletes a dongle with a full teardown. Performs, in order:
+
+1. Disconnect the modem and bring the interface down
+2. Remove the dongle's routing rule (`ip rule`) and default route from its routing table
+3. Remove the proxy container and its record if one exists
+4. Delete the dongle record
+
+All steps are idempotent; failures to disconnect or remove the proxy are logged and do not prevent the dongle record from being deleted.
+
+**Response**
+
+`204 No Content` (no body).
+
+Returns `404 Not Found` if the dongle does not exist.
+
+### Local Connections
+
+Local connections expose host network interfaces (ethernet / wifi) as proxy
+uplinks, alongside dongles. They are strictly pinned to the chosen interface
+(dedicated routing table + firewall mark + nftables rules, cf.
+`docs/networking.md`) and **cannot have their public IP reset** — unlike a
+dongle, a host interface has no modem to re-enumerate.
+
+#### List Local Connections
+
+**GET** `/api/v1/local-connections`
+
+Lists the host interfaces usable as proxy uplinks and whether each is enrolled.
+
+**Response**
+```json
+[
+  {
+    "interface_name": "eth0",
+    "ip": "192.168.1.10",
+    "kind": "ethernet",
+    "enrolled": false,
+    "proxy_id": null
+  },
+  {
+    "interface_name": "wlan0",
+    "ip": "192.168.1.22",
+    "kind": "wifi",
+    "enrolled": true,
+    "proxy_id": "123e4567-e89b-12d3-a456-426614174000"
+  }
+]
+```
+
+- `kind` is one of `ethernet`, `wifi`, `other`.
+- `enrolled` is `true` when a persisted proxy already exists for the interface;
+  `proxy_id` then holds its id.
+- WWAN (dongle/modem) interfaces are excluded, as are interfaces currently used
+  by an enrolled dongle.
+
+#### Enroll Local Connection
+
+**POST** `/api/v1/local-connections`
+
+Enrolls a host interface, creating (or reusing) its proxy and pinning it to the
+interface.
+
+**Request**
+```json
+{
+  "interface_name": "eth0",
+  "enabled": true
+}
+```
+
+- `enabled` is optional and defaults to the proxy's existing/desired state.
+
+**Response**
+```json
+{
+  "proxy": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "source": "LOCAL",
+    "interface_name": "eth0",
+    "port": 8080,
+    "route_table_id": 10001,
+    "fwmark": 1
+  },
+  "password": "one-time-proxy-password"
+}
+```
+
+- Returns `201 Created` when a new proxy is provisioned, `200 OK` when the
+  interface was already enrolled (idempotent).
+- The operation is idempotent: re-enrolling the same interface reuses the
+  existing proxy rather than creating a second one.
+- Returns `422 Unprocessable Entity` with a clean business message when the
+  interface is unknown or has no usable IPv4 gateway.
+
+#### Unenroll Local Connection
+
+**DELETE** `/api/v1/local-connections/{interface_name}`
+
+Removes the interface's proxy, releases its routing pinning and frees the
+routing slot. Idempotent.
+
+**Response**
+
+`204 No Content` (no body).
+
+### Proxy Management
+
+#### Create Proxy
+
+**POST** `/api/v1/proxies`
+
+Creates a new proxy for a dongle.
+
+**Request**
+```json
+{
+  "dongle_id": "123e4567-e89b-12d3-a456-426614174000",
+  "port": 8080
+}
+```
+
+**Response**
+```json
+{
+  "id": "123e4567-e89b-12d3-a456-426614174000",
+  "dongle_id": "123e4567-e89b-12d3-a456-426614174000",
+  "port": 8080,
+  "state": "CREATED"
+}
+```
+
+#### Start Proxy
+
+**POST** `/api/v1/proxies/{id}/start`
+
+Starts a proxy.
+
+**Response**
+```json
+{
+  "id": "123e4567-e89b-12d3-a456-426614174000",
+  "state": "STARTING"
+}
+```
+
+#### Stop Proxy
+
+**POST** `/api/v1/proxies/{id}/stop`
+
+Stops a proxy.
+
+**Response**
+```json
+{
+  "id": "123e4567-e89b-12d3-a456-426614174000",
+  "state": "STOPPING"
+}
+```
+
+#### Remove Proxy
+
+**POST** `/api/v1/proxies/{id}/remove`
+
+Removes a proxy.
+
+**Response**
+```json
+{
+  "id": "123e4567-e89b-12d3-a456-426614174000",
+  "state": "REMOVING"
+}
+```
+
+### Settings
+
+Global settings, all under `/api/v1/settings`, protected by the same Basic Auth.
+
+#### Get Proxy Auto-Create
+
+**GET** `/api/v1/settings/proxy-auto-create`
+
+Returns whether a proxy is automatically provisioned for a newly enrolled dongle.
+
+**Response**
+```json
+{
+  "enabled": true
+}
+```
+
+#### Set Proxy Auto-Create
+
+**PUT** `/api/v1/settings/proxy-auto-create`
+
+Enables or disables automatic proxy creation on dongle enrollment.
+
+**Request**
+```json
+{
+  "enabled": true
+}
+```
+
+**Response**: the resulting setting (same shape as `GET`).
+
+#### Get Proxy Listen Interface
+
+**GET** `/api/v1/settings/proxy-listen-interface`
+
+Returns the host interface on which proxy ports are published. `null` means the
+default `0.0.0.0` (all interfaces).
+
+**Response**
+```json
+{
+  "interface_name": "eth0"
+}
+```
+
+#### Set Proxy Listen Interface
+
+**PUT** `/api/v1/settings/proxy-listen-interface`
+
+Sets the host interface on which the proxy ports are published. Only `ethernet`
+and `wifi` interfaces are accepted (never a dongle/WWAN, nor `lo`/`docker`/`veth`).
+Sending `null` (or an empty value) resets the setting to the default `0.0.0.0`.
+
+**Request**
+```json
+{
+  "interface_name": "eth0"
+}
+```
+
+**Response**: the resulting setting (same shape as `GET`).
+
+- Returns `422 Unprocessable Entity` with a clean business message when the
+  interface is unknown, is not of type `ethernet`/`wifi`, or has no IPv4 address.
+- On success the change is applied to all currently active proxies (a brief
+  restart), re-binding their published ports to the chosen interface's IPv4.
+- If the chosen interface later disappears or loses its IPv4, the proxy port is
+  simply **not published** (the container stays active) and the publication is
+  re-applied automatically by the reconciliation when the interface returns.
+  See `docs/networking.md` → *Listen Interface (ingress)*.
+
+## Error Codes
+
+| Code | Description |
+|--------|-------------|
+| 400 | Bad Request |
+| 401 | Unauthorized |
+| 403 | Forbidden |
+| 404 | Not Found |
+| 409 | Conflict (e.g., duplicate enrollment) |
+| 422 | Unprocessable Entity (e.g., incomplete identity) |
+| 500 | Internal Server Error |
