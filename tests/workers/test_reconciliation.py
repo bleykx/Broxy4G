@@ -313,7 +313,7 @@ async def test_reconcile_running_proxy_republishes_when_compose_drifted(
     proxy_files.write_compose(proxy.id, "name: drifted\n# stale bind 1.2.3.4\n")
 
     up_before = sum(1 for c in fake_docker_compose.calls if c[1] == "up")
-    await reconciliation_worker._reconcile_proxy(proxy)
+    await reconciliation_worker.proxy_reconciler.reconcile_proxy(proxy)
     up_after = sum(1 for c in fake_docker_compose.calls if c[1] == "up")
 
     assert up_after == up_before + 1

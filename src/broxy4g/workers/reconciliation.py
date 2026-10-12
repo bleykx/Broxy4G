@@ -7,7 +7,6 @@ from broxy4g.adapters.modem_manager import ModemManagerAdapter
 from broxy4g.adapters.nftables import NftablesAdapter
 from broxy4g.adapters.routing import RoutingAdapter
 from broxy4g.domain.dongle_states import DongleState, can_transition
-from broxy4g.domain.proxy import ProxySource
 from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
@@ -19,6 +18,7 @@ from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.routing_slot_migration import RoutingSlotMigration
 from broxy4g.services.uplink_routes import UplinkRouteService
 from broxy4g.services.usb_recovery import UsbRecoveryService
+from broxy4g.workers.proxy_reconciliation import ProxyReconciler
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,13 @@ class ReconciliationWorker:
         self.reset_lock = reset_lock
         self.local_connections = local_connections
         self.usb_recovery = usb_recovery
+        self.proxy_reconciler = ProxyReconciler(
+            proxy_repo=proxy_repo,
+            dongle_repo=dongle_repo,
+            provisioning=provisioning,
+            docker_compose=docker_compose,
+            local_connections=local_connections,
+        )
 
     async def reconcile_all(self) -> None:
         """Reconcilie tous les dongles puis tous les proxies enregistrés."""
@@ -97,26 +104,7 @@ class ReconciliationWorker:
 
     async def reconcile_proxies(self) -> None:
         """Réaligne chaque proxy sur son état désiré (activé/désactivé)."""
-        for proxy in await self.proxy_repo.list_all():
-            try:
-                if await self._is_orphan(proxy):
-                    logger.info(
-                        "Proxy orphelin %s (dongle disparu), suppression", proxy.id
-                    )
-                    await self.provisioning.remove(proxy.id)
-                    continue
-                if proxy.source_type is ProxySource.LOCAL:
-                    await self._reconcile_local_proxy(proxy)
-                    continue
-                await self._reconcile_proxy(proxy)
-            except Exception:
-                logger.exception("Reconciliation échouée pour proxy %s", proxy.id)
-
-    async def _is_orphan(self, proxy) -> bool:
-        """Un proxy de dongle dont le dongle n'existe plus est orphelin."""
-        if proxy.source_type is not ProxySource.DONGLE or proxy.dongle_id is None:
-            return False
-        return await self.dongle_repo.get_by_id(proxy.dongle_id) is None
+        await self.proxy_reconciler.reconcile_proxies()
 
     async def reconcile_dongle(self, dongle_id: UUID) -> None:
         """Restaure un dongle spécifique : connexion, routes, proxy."""
@@ -157,7 +145,7 @@ class ReconciliationWorker:
             if refreshed is not None:
                 dongle = refreshed
 
-        await self._restore_proxy(dongle)
+        await self.proxy_reconciler.restore_dongle_proxy(dongle)
         # (Re)pose des routes d'uplink SANS reconnexion : sur un dongle déjà
         # actif (connect() sauté), une route écrasée est détectée et réparée ici.
         await self._repair_uplink_routes(dongle)
@@ -182,36 +170,6 @@ class ReconciliationWorker:
             if can_transition(dongle.state, DongleState.ERROR):
                 dongle.change_state(DongleState.ERROR)
             await self.dongle_repo.save(dongle)
-
-    async def _restore_proxy(self, dongle) -> None:
-        """Réaligne le proxy du dongle sur son état désiré."""
-        proxy = await self.proxy_repo.get_by_dongle_id(dongle.id)
-        if proxy is not None:
-            await self._reconcile_proxy(proxy)
-
-    async def _reconcile_proxy(self, proxy) -> None:
-        """Recrée/redémarre un proxy activé, arrête un proxy désactivé."""
-        state = await self.docker_compose.state(proxy.container_name)
-        if proxy.enabled:
-            if state != "running":
-                logger.info("Proxy %s non actif (state=%s), reprovisionnement", proxy.id, state)
-                await self.provisioning.reprovision(proxy.id)
-            else:
-                # Déjà running : corrige une dérive de publication (bind changé,
-                # interface d'écoute revenue) sans redémarrer un conteneur inchangé.
-                await self.provisioning.ensure_publish(proxy)
-        elif state == "running":
-            logger.info("Proxy %s désactivé mais actif, arrêt", proxy.id)
-            await self.provisioning.down(proxy)
-
-    async def _reconcile_local_proxy(self, proxy) -> None:
-        """Restaure l'épinglage d'un proxy local puis réaligne son conteneur."""
-        if self.local_connections is not None and proxy.interface_name:
-            try:
-                await self.local_connections.restore(proxy.interface_name)
-            except Exception:
-                logger.exception("Échec restauration épingle locale %s", proxy.interface_name)
-        await self._reconcile_proxy(proxy)
 
     async def _repair_uplink_routes(self, dongle) -> None:
         """(Re)pose les routes d'uplink du dongle sans reconnexion du modem.
