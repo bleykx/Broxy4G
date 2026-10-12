@@ -10,7 +10,6 @@ from broxy4g.adapters.nftables import NftablesAdapter
 from broxy4g.adapters.routing import RoutingAdapter
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
-from broxy4g.domain.interface_naming import NamedDongle, plan_interface_names
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.routing_allocator import RoutingAllocator
@@ -76,29 +75,35 @@ class ConnectionService:
 
         # Resolve modem to handle USB port changes
         modem = await self._resolve_modem(dongle)
-        if not modem or not modem.interface_name:
-            logger.error(
-                "Connect dongle %s échoué: modem introuvable ou sans interface (modem=%s)",
-                dongle_id, modem,
+        if modem is None:
+            return await self._fail_connect(
+                dongle, dongle_id, f"modem introuvable (IMEI={dongle.identity.imei})"
             )
-            dongle.fail(
-                f"modem introuvable (IMEI={dongle.identity.imei}, "
-                f"interface attendue={modem.interface_name if modem else None})"
+        if modem.interface_name is None:
+            return await self._fail_connect(
+                dongle, dongle_id,
+                "modem sans interface réseau (port net absent chez ModemManager)",
             )
-            await self.dongle_repo.save(dongle)
-            return dongle
+
+        # L'application ne renomme jamais un netdev (fragile avec ModemManager :
+        # le port net du modem est alors perdu). Le nom provient du netdev
+        # rattaché au modem, résolu par l'adaptateur (sysfs), et est persisté.
+        iface_name = modem.interface_name
+        dongle.interface_name = iface_name
 
         await self._ensure_routing(dongle)
 
         try:
-            # Renomme l'interface sur le nom dérivé du label (idempotent).
-            # L'échec du renommage tombe dans l'except ci-dessous (dongle.fail).
-            iface_name = await self._resolve_interface_name(dongle, modem.interface_name)
-            dongle.interface_name = iface_name
             # ModemManager établit le bearer et expose la configuration IP ;
             # il ne configure jamais l'interface hôte : on l'applique nous-mêmes.
             await self.modem.connect(modem.path, dongle.apn or "", dongle.apn_auth)
             bearer = await self.modem.get_bearer_ip(modem.path)
+            if bearer is not None and bearer.method == "ppp":
+                return await self._fail_connect(
+                    dongle, dongle_id,
+                    "ModemManager a établi une session PPP sans interface réseau "
+                    "(port net absent chez ModemManager)",
+                )
             await self.iface.set_up(iface_name)
             # Purge les adresses résiduelles avant assignation : sinon une IPv4
             # périmée reste la 1re source et échappe à ``ip rule from <bearer>``.
@@ -128,26 +133,14 @@ class ConnectionService:
         await self._apply_isolation()
         return dongle
 
-    async def _resolve_interface_name(self, dongle: Dongle, current_name: str) -> str:
-        """Renomme l'interface courante en le nom dérivé du label (idempotent).
-
-        Le plan est déterministe sur l'ensemble des dongles (tri par
-        identity_key) : aucun renvoi sur l'ordre USB ni le nom courant.
-        """
-        siblings = await self.dongle_repo.list_all()
-        plan = plan_interface_names(
-            NamedDongle(d.identity_key, d.label) for d in siblings
-        )
-        desired = plan[dongle.identity_key]
-        if desired == current_name:
-            return desired
-        try:
-            await self.iface.rename(current_name, desired)
-        except Exception as exc:
-            raise RuntimeError(
-                f"échec renommage interface {current_name} -> {desired}: {exc}"
-            ) from exc
-        return desired
+    async def _fail_connect(
+        self, dongle: Dongle, dongle_id: UUID, message: str
+    ) -> Dongle:
+        """Échec métier de connexion : log ERROR lisible + dongle ERROR."""
+        logger.error("Connect dongle %s échoué: %s", dongle_id, message)
+        dongle.fail(message)
+        await self.dongle_repo.save(dongle)
+        return dongle
 
     async def _teardown_uplink(self, dongle: Dongle) -> None:
         """Déconnecte le bearer et nettoie interface + règles/routes.

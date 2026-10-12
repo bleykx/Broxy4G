@@ -24,35 +24,31 @@ Each dongle's interface is configured with:
 - A dedicated firewall mark
 - Appropriate routing rules
 
-### Nommage de l'interface dongle (dérivé du label)
+### Nommage de l'interface dongle (jamais renommé par l'application)
 
-À chaque connexion (`ConnectionService.connect()`, donc aussi à la
-reconciliation et au reset), l'interface du dongle est **renommée** pour
-reprendre un nom dérivé de son `label` (`domain/interface_naming.py`) :
+**L'application ne renomme jamais l'interface réseau d'un dongle.** Un
+renommage `ip link set <if> name …` fait perdre à ModemManager le port réseau
+`(net)` du modem (le dongle n'expose alors que des ports AT et
+`mmcli --simple-connect` dégrade en session PPP sans IPv4) ; de plus,
+`ip link set name` n'étant pas persistant, tout renommage est structurellement
+fragile au reboot suivant.
 
-- Le nom est le label normalisé (NFKD, accents retirés), en minuscules, avec
-  toute suite de caractères non `[a-z0-9]` réduite à un seul `-`, les `-` de
-  bord retirés, et tronqué à **15 caractères** (limite Linux `IFNAMSIZ - 1`).
-  Un label vide (ou sans caractère utilisable) donne le nom `dongle`.
-- Les collisions entre dongles (labels identiques ou tronqués identiques)
-  sont résolues **déterministement** : les dongles sont triés par
-  `identity_key` (IMEI > serial USB > ICCID) ; le premier garde le nom de
-  base, les suivants reçoivent un suffixe `-<4 derniers caractères
-  sanitizés de l'identity_key>` (`-0000` si l'identité ne fournit aucun
-  caractère utilisable), la base étant tronquée pour tenir dans 15 caractères.
-  Un compteur court déterministe complète l'unicité en dernier recours.
-- Le renommage est **idempotent** : si l'interface porte déjà le nom désiré,
-  aucun appel système n'est émis. Sinon, l'adaptateur (`adapters/net_interface.py`)
-  émet `ip link set dev <old> down` puis `ip link set dev <old> name <new>` ;
-  l'interface reste down, le flux de connexion la remonte ensuite. Un échec
-  de renommage échoue la connexion avec un message métier propre
-  (`échec renommage interface <old> -> <new>: <detail>`).
-- **L'identité stable d'un dongle reste l'IMEI / le serial USB** : ni l'index
-  USB ni le nom d'interface (y compris le nom dérivé du label) ne sont
-  utilisés pour l'identifier. Le nom d'interface est un confort d'exploitation,
-  jamais une clé.
-- Modifier le label d'un dongle change le nom d'interface **à la prochaine
-  connexion** (reconciliation, reset ou reconnexion).
+- Le nom d'interface est le **nom du netdev assigné par le noyau** (`wwan0`,
+  `wwx0`, …), rattaché au périphérique USB du modem. Il est résolu **à la
+  lecture** par l'adaptateur ModemManager (`RealModemManager` via sysfs :
+  le netdev dont le chemin sysfs est sous le chemin USB du modem, avec
+  frontière de séparateur stricte), puis **persisté** sur le dongle
+  (`dongle.interface_name`) comme confort d'exploitation.
+- Après un reset modem (ré-énumération USB), le noyau peut attribuer un autre
+  nom (`wwan0` → `wwx0`, …) : le netdev est simplement **re-résolu** via
+  sysfs à la reconnexion. Aucun appel `ip link set … name` n'est émis.
+- **L'identité stable d'un dongle reste l'IMEI** (puis le serial USB / l'ICCID) :
+  ni l'index USB ni le nom d'interface ne sont utilisés pour l'identifier.
+  Le nom d'interface est un confort d'exploitation, jamais une clé.
+- Conséquence côté NetworkManager : le motif `unmanaged-devices` doit couvrir
+  les noms de noyau `wwan*`/`wwx*` (et pas seulement les anciens noms `dongle-*`)
+  pour que NetworkManager ne se soit jamais empare de l'interface du dongle
+  (cf. `docs/deployment.md`).
 
 ## Interface Address and Probes
 

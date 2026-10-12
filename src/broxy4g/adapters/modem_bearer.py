@@ -28,6 +28,10 @@ async def read_bearer(shell: ShellAdapter, bearer_path: str) -> BearerIpConfig |
     address = fields.get("bearer.ipv4-config.address")
     prefix_raw = fields.get("bearer.ipv4-config.prefix")
     if not address or address == "--" or not prefix_raw or prefix_raw == "--":
+        if fields.get("bearer.ipv4-config.method") == "ppp":
+            # Session PPP sans interface réseau (port net absent chez
+            # ModemManager) : aucune IPv4 — le diagnostic est remonté.
+            return BearerIpConfig(address="", prefix=0, method="ppp", path=bearer_path)
         return None
     gateway = fields.get("bearer.ipv4-config.gateway")
     interface = fields.get("bearer.status.interface")

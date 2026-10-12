@@ -31,6 +31,8 @@ async def test_connect_transitions_to_online(connection_service, enrollment_serv
 
     result = await connection_service.connect(dongle.id)
     assert result.state == DongleState.ONLINE
+    # Contrat : aucun renommage d'interface (le nom persisté est celui du modem).
+    assert result.interface_name == "wwan0"
 
 
 @pytest.mark.asyncio
@@ -130,8 +132,8 @@ async def test_connect_handles_port_change(connection_service, enrollment_servic
         result = await connection_service.connect(dongle.id)
 
     assert result.state == DongleState.ONLINE
-    # L'interface est renommée d'après le label "Test", quel que soit le nom modem.
-    assert result.interface_name == "test"
+    # L'application ne renomme jamais : l'interface est celle du modem.
+    assert result.interface_name == "wwan1"
     mock_connect.assert_awaited_once_with("/org/freedesktop/ModemManager1/Modem/1", "test.apn", None)
 
 
@@ -147,6 +149,9 @@ async def test_connect_handles_absent_modem(connection_service, enrollment_servi
 
     assert result.state == DongleState.ERROR
     mock_connect.assert_not_awaited()
+    # Message métier distinct du cas « modem sans interface réseau ».
+    assert result.last_error == "modem introuvable (IMEI=123456789012345)"
+    assert "port net" not in (result.last_error or "")
 
 
 @pytest.mark.asyncio
@@ -267,71 +272,88 @@ async def test_connect_flushes_stale_addresses(connection_service, enrollment_se
     result = await connection_service.connect(dongle.id)
 
     assert result.state == DongleState.ONLINE
-    assert result.interface_name == "test"
-    assert await fake_iface.get_ip("test") == BEARER.address
+    assert result.interface_name == "wwan0"
+    assert await fake_iface.get_ip("wwan0") == BEARER.address
 
 
 @pytest.mark.asyncio
-async def test_connect_renames_interface_from_label(
+async def test_connect_never_renames_interface(
     connection_service, enrollment_service, fake_modem, fake_iface
 ):
-    """À la connexion, l'interface est renommée d'après le label du dongle."""
+    """L'application ne renomme jamais un netdev : aucun appel de renommage."""
     identity = IdentityMaterial(imei="123456789012345")
     dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
     dongle.route_table_id = 10001
     dongle.fwmark = 1
     add_modem(fake_modem)
-
-    result = await connection_service.connect(dongle.id)
-
-    assert result.state == DongleState.ONLINE
-    assert fake_iface.renames == [("wwan0", "test")]
-    assert result.interface_name == "test"
-    assert await fake_iface.get_ip("test") == BEARER.address
-
-
-@pytest.mark.asyncio
-async def test_connect_rename_idempotent_when_already_named(
-    connection_service, enrollment_service, fake_modem, fake_iface
-):
-    """Si l'interface porte déjà le nom désiré, aucun appel système n'est émis."""
-    identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
-    dongle.interface_name = "test"
-    dongle.route_table_id = 10001
-    dongle.fwmark = 1
-    await enrollment_service.dongle_repo.save(dongle)
-    add_modem(fake_modem, interface="test")  # modem déjà sur le nom dérivé
 
     result = await connection_service.connect(dongle.id)
 
     assert result.state == DongleState.ONLINE
     assert fake_iface.renames == []
-    assert result.interface_name == "test"
+    # Le nom persisté est celui du netdev résolu par l'adaptateur (sysfs).
+    assert result.interface_name == "wwan0"
+    assert await fake_iface.get_ip("wwan0") == BEARER.address
 
 
 @pytest.mark.asyncio
-async def test_connect_rename_failure_sets_error(
+async def test_connect_modem_without_interface_fails(
     connection_service, enrollment_service, fake_modem, fake_iface
 ):
-    """Un échec de renommage passe le dongle en ERROR avec un message métier clair."""
+    """Modem trouvé mais sans port net → ERROR avec un message métier explicite."""
     identity = IdentityMaterial(imei="123456789012345")
     dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
-    dongle.route_table_id = 10001
-    dongle.fwmark = 1
-    add_modem(fake_modem)
+    dongle.interface_name = "wwan0"
+    add_modem(fake_modem, interface=None)
 
-    with patch.object(
-        fake_iface, "rename", new=AsyncMock(side_effect=RuntimeError("Device or resource busy"))
-    ):
+    with patch.object(fake_modem, "connect", new=AsyncMock()) as mock_connect:
         result = await connection_service.connect(dongle.id)
 
     assert result.state == DongleState.ERROR
+    mock_connect.assert_not_awaited()
+    assert fake_iface.renames == []
     saved = await enrollment_service.dongle_repo.get_by_id(dongle.id)
     assert saved.state == DongleState.ERROR
     assert saved.last_error is not None
-    assert "renommage" in saved.last_error
-    assert "wwan0 -> test" in saved.last_error
+    assert "port net" in saved.last_error
+    # Message distinct du cas « modem introuvable ».
+    assert "introuvable" not in saved.last_error
+
+
+@pytest.mark.asyncio
+async def test_connect_ppp_bearer_fails_with_ppp_message(
+    connection_service, enrollment_service, fake_modem, fake_iface
+):
+    """Bearer PPP sans interface réseau → message métier PPP, pas le générique."""
+    identity = IdentityMaterial(imei="123456789012345")
+    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle.interface_name = "wwan0"
+    dongle.route_table_id = 10001
+    dongle.fwmark = 1
+    add_modem(
+        fake_modem,
+        bearer=BearerIpConfig(address="", prefix=0, method="ppp"),
+    )
+
+    service = ConnectionService(
+        connection_service.dongle_repo, fake_modem, fake_iface,
+        connection_service.routing, connection_service.nft,
+        connection_service.connectivity,
+        connection_service.allocator,
+        connection_service.uplink_routes,
+        ip_wait_attempts=1, ip_wait_delay=0.01,
+    )
+    result = await service.connect(dongle.id)
+
+    assert result.state == DongleState.ERROR
+    assert fake_iface.renames == []
+    saved = await enrollment_service.dongle_repo.get_by_id(dongle.id)
+    assert saved.state == DongleState.ERROR
+    assert saved.last_error is not None
+    assert "PPP" in saved.last_error
+    assert "port net" in saved.last_error
+    # Pas le message générique d'attente d'IPv4.
+    assert "no IPv4" not in saved.last_error
 
 
 @pytest.mark.asyncio
@@ -370,10 +392,9 @@ async def test_disconnect_flushes_addresses(connection_service, enrollment_servi
     dongle.interface_name = "wwan0"
     add_modem(fake_modem)
     await connection_service.connect(dongle.id)
-    # ModemManager reflète le renommage : le modem expose désormais "test".
-    (await fake_modem.get_modem(MODEM_PATH)).interface_name = "test"
-    assert await fake_iface.get_ip("test") == BEARER.address
+    # Aucun renommage : l'interface garde le nom du modem (wwan0).
+    assert await fake_iface.get_ip("wwan0") == BEARER.address
 
     await connection_service.disconnect(dongle.id)
 
-    assert await fake_iface.get_ip("test") is None
+    assert await fake_iface.get_ip("wwan0") is None

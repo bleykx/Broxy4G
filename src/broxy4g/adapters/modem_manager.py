@@ -37,7 +37,12 @@ class ModemManagerAdapter(Protocol):
 
 @dataclass
 class BearerIpConfig:
-    """Configuration IPv4 d'un bearer ModemManager."""
+    """Configuration IPv4 d'un bearer ModemManager.
+
+    ``method`` transporte la méthode de configuration IP
+    (``bearer.ipv4-config.method``) : ``"ppp"`` signale une session PPP sans
+    interface réseau (port net absent chez ModemManager), sans IPv4 utilisable.
+    """
 
     address: str
     prefix: int
@@ -46,6 +51,7 @@ class BearerIpConfig:
     interface: str | None = None
     mtu: int | None = None
     path: str | None = None
+    method: str | None = None
 
 
 @dataclass

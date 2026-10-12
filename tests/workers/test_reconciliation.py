@@ -422,5 +422,5 @@ async def test_degraded_with_stale_address_recovers(
 
     refreshed = await reconciliation_worker.dongle_repo.get_by_id(dongle.id)
     assert refreshed.state == DongleState.ONLINE
-    # L'interface a été renommée d'après le label "Test" pendant la reconnexion.
-    assert await fake_iface.get_ip("test") == BEARER.address
+    # Aucun renommage : l'interface garde le nom du modem (wwan0).
+    assert await fake_iface.get_ip("wwan0") == BEARER.address

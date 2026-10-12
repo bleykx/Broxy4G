@@ -69,6 +69,30 @@ No restart of polkitd or the service is required: rules in `rules.d` are
 picked up automatically. Without this rule, `mmcli --simple-connect` fails
 with `PolicyKit authorization failed` and the dongle cannot be connected.
 
+### NetworkManager: keep dongle interfaces unmanaged
+
+Broxy4G manages the dongle's interface itself (ModemManager bearer +
+`ip addr/rule/route`). NetworkManager must never claim it. Because the
+application **never renames** the netdev, the interface keeps its kernel
+name (`wwan0`, `wwx0`, … — and possibly new names after a modem reset or
+kernel update): the `unmanaged-devices` pattern must therefore match the
+**kernel names** `wwan*`/`wwx*`, not only historical `dongle-*` names.
+
+Create this configuration on **every machine** where the service runs:
+
+```bash
+sudo tee /etc/NetworkManager/conf.d/10-broxy4g-unmanaged.conf <<'EOF'
+[device]
+# dongle netdevs are managed by ModemManager + Broxy4G, never by NetworkManager
+unmanaged-devices=interface-name:wwan*;interface-name:wwx*;interface-name:dongle-*
+EOF
+sudo systemctl restart NetworkManager
+```
+
+Restarting NetworkManager (or a reboot) applies the pattern. If the pattern
+is missing or too narrow, NetworkManager may take over the dongle interface
+and break the dedicated routing table / bearer IP configuration.
+
 ## systemd Setup
 
 ### Copy Service File

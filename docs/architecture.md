@@ -175,3 +175,11 @@ Dongles are identified by a stable hardware identity, in order of preference:
 3. ICCID (Integrated Circuit Card ID)
 
 This ensures that a dongle can be consistently identified even after reboots, USB unplugging/replugging, or other system changes.
+
+L'application **ne renomme jamais** l'interface réseau d'un dongle : un
+renommage `ip link set … name` fait perdre à ModemManager le port réseau
+`(net)` du modem (dégradation en session PPP sans IPv4) et n'est pas
+persistant. Le nom d'interface (assigné par le noyau : `wwan0`, `wwx0`, …)
+est résolu à la lecture via sysfs (netdev rattaché au périphérique USB du
+modem) et persisté sur le dongle comme simple confort d'exploitation — il
+n'est jamais utilisé pour l'identifier.

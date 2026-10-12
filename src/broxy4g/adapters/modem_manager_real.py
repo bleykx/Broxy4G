@@ -199,13 +199,20 @@ class RealModemManager:
 
     @staticmethod
     def _resolve_iface_from_sysfs(device_path: str | None) -> str | None:
-        """Find first /sys/class/net/* whose realpath starts with device_path."""
+        """Find the /sys/class/net/* netdev attached to ``device_path``.
+
+        Seule source du nom d'interface : le netdev réellement rattaché au
+        périphérique USB du modem, quel que soit son nom. La comparaison exige
+        une frontière de séparateur : le chemin d'un dongle ``.../1-1.2.4.3``
+        ne doit pas matcher le sibling ``.../1-1.2.4.30``. L'itération est
+        déterministe (tri alphabétique).
+        """
         if not device_path:
             return None
         try:
-            for name in os.listdir("/sys/class/net"):
+            for name in sorted(os.listdir("/sys/class/net")):
                 link = os.path.realpath(f"/sys/class/net/{name}")
-                if link.startswith(device_path):
+                if link == device_path or link.startswith(device_path + os.sep):
                     return name
         except OSError:
             pass

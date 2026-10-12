@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from broxy4g.adapters.modem_manager_real import RealModemManager
@@ -544,6 +546,99 @@ class TestGetImei:
         m = RealModemManager(fake_shell)
         imei = await m.get_imei("/org/freedesktop/ModemManager1/Modem/0")
         assert imei == "867028041311336"
+
+
+class TestResolveIfaceFromSysfs:
+    """Frontière de chemin : `.../1-1.2.4.3` ne doit pas matcher `.../1-1.2.4.30`."""
+
+    BASE = "/sys/devices/pci0000:00/0000:00:14.0/usb1"
+
+    def _patch_sysfs(self, monkeypatch, entries: dict[str, str]) -> None:
+        monkeypatch.setattr(os, "listdir", lambda path: sorted(entries))
+        monkeypatch.setattr(
+            os.path, "realpath", lambda path: entries[os.path.basename(path)]
+        )
+
+    def test_returns_attached_netdev(self, monkeypatch):
+        self._patch_sysfs(monkeypatch, {
+            "eth0": "/sys/devices/pci0000:00/0000:00:1f.6/virtio1/net/eth0",
+            "wwan0": f"{self.BASE}/1-1.2.4.3/net/wwan0",
+        })
+        result = RealModemManager._resolve_iface_from_sysfs(f"{self.BASE}/1-1.2.4.3")
+        assert result == "wwan0"
+
+    def test_sibling_path_prefix_does_not_match(self, monkeypatch):
+        """Un netdev rattaché au sibling `1-1.2.4.30` n'est pas retourné pour `1-1.2.4.3`."""
+        self._patch_sysfs(monkeypatch, {
+            "wwx0": f"{self.BASE}/1-1.2.4.30/net/wwx0",
+        })
+        result = RealModemManager._resolve_iface_from_sysfs(f"{self.BASE}/1-1.2.4.3")
+        assert result is None
+
+    def test_sibling_still_matches_its_own_device(self, monkeypatch):
+        self._patch_sysfs(monkeypatch, {
+            "wwan0": f"{self.BASE}/1-1.2.4.3/net/wwan0",
+            "wwx0": f"{self.BASE}/1-1.2.4.30/net/wwx0",
+        })
+        result = RealModemManager._resolve_iface_from_sysfs(f"{self.BASE}/1-1.2.4.30")
+        assert result == "wwx0"
+
+    def test_exact_path_matches(self, monkeypatch):
+        self._patch_sysfs(monkeypatch, {
+            "wwan0": f"{self.BASE}/1-1.2.4.3",
+        })
+        result = RealModemManager._resolve_iface_from_sysfs(f"{self.BASE}/1-1.2.4.3")
+        assert result == "wwan0"
+
+    def test_deterministic_order(self, monkeypatch):
+        """L'itération est triée : le premier netdev en ordre alphabétique gagne."""
+        self._patch_sysfs(monkeypatch, {
+            "wwx9": f"{self.BASE}/1-1.2.4.3/net/wwx9",
+            "wwan1": f"{self.BASE}/1-1.2.4.3/net/wwan1",
+        })
+        result = RealModemManager._resolve_iface_from_sysfs(f"{self.BASE}/1-1.2.4.3")
+        assert result == "wwan1"
+
+    def test_none_without_device_path(self):
+        assert RealModemManager._resolve_iface_from_sysfs(None) is None
+
+
+BEARER_K_PPP = (
+    "bearer.status.connected         : yes\n"
+    "bearer.ipv4-config.method       : ppp\n"
+    "bearer.ipv4-config.address      : --\n"
+    "bearer.ipv4-config.prefix       : --\n"
+    "bearer.ipv4-config.gateway      : --\n"
+    "bearer.status.interface         : --\n"
+)
+
+
+class TestGetBearerIp:
+    MODEM = "/org/freedesktop/ModemManager1/Modem/0"
+    BEARER = "/org/freedesktop/ModemManager1/Bearer/0"
+
+    def _register_bearer(self, fake_shell, output: str) -> None:
+        fake_shell.set_response(["mmcli", "-m", self.MODEM, "-K"],
+                                ShellResult(0, MMCLI_M_WITH_BEARER, ""))
+        fake_shell.set_response(["mmcli", "-b", self.BEARER, "-K"],
+                                ShellResult(0, output, ""))
+
+    async def test_ppp_session_surfaces_method(self, fake_shell):
+        """Une session PPP sans adresse remonte ``method="ppp"`` (diagnostic)."""
+        self._register_bearer(fake_shell, BEARER_K_PPP)
+        m = RealModemManager(fake_shell)
+        config = await m.get_bearer_ip(self.MODEM)
+        assert config is not None
+        assert config.method == "ppp"
+        assert config.address == ""
+
+    async def test_static_session_has_no_method(self, fake_shell):
+        self._register_bearer(fake_shell, BEARER_K_CONNECTED)
+        m = RealModemManager(fake_shell)
+        config = await m.get_bearer_ip(self.MODEM)
+        assert config is not None
+        assert config.method is None
+        assert config.address == "10.0.0.2"
 
 
 class TestGetIccid:
