@@ -33,6 +33,7 @@ from broxy4g.services.local_connections import LocalConnectionsService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot
 from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.proxy_files import ProxyFileWriter, ProxyPaths
+from broxy4g.services.proxy_health import ProxyHealthService
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
 from broxy4g.services.proxy_listen import ProxyListenService
 from broxy4g.services.proxy_ports import PortAllocator
@@ -136,6 +137,9 @@ def create_app(
     port_allocator = PortAllocator(app.state.proxy_repo)
     app.state.proxy_listen_service = ProxyListenService(
         app.state.settings_repo, app.state.local_uplink
+    )
+    app.state.proxy_health_service = ProxyHealthService(
+        app.state.proxy_repo, app.state.docker_compose, app.state.proxy_listen_service
     )
     app.state.provisioning = ProxyProvisioningService(
         app.state.proxy_repo,

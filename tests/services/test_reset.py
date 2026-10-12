@@ -16,7 +16,7 @@ async def _enroll_in_state(
     state: DongleState = DongleState.ONLINE,
 ):
     """Enrôle un dongle dans l'état donné, modem+bearer prêts pour un reset DONE."""
-    dongle = await enrollment_service.enroll(IdentityMaterial(imei=imei), "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(IdentityMaterial(imei=imei), "Test", "test.apn")).dongle
     dongle.state = state
     dongle.interface_name = interface
     dongle.route_table_id = table_id
@@ -37,7 +37,7 @@ async def test_reset_returns_done_on_success(
     reset_service, enrollment_service, connection_service, fake_modem, fake_iface
 ):
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
 
     # Set dongle to ONLINE so reset can transition to RESETTING
     dongle.state = DongleState.ONLINE
@@ -62,7 +62,7 @@ async def test_reset_returns_done_on_success(
 @pytest.mark.asyncio
 async def test_reset_returns_pending_if_already_in_progress(reset_service, enrollment_service, fake_reset_lock):
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", None)
+    dongle = (await enrollment_service.enroll(identity, "Test", None)).dongle
     fake_reset_lock.acquire(str(dongle.id))
     result = await reset_service.reset(dongle.id)
     assert result.status == "PENDING"
@@ -71,7 +71,7 @@ async def test_reset_returns_pending_if_already_in_progress(reset_service, enrol
 @pytest.mark.asyncio
 async def test_reset_releases_lock_even_on_error(reset_service, enrollment_service, fake_reset_lock):
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", None)
+    dongle = (await enrollment_service.enroll(identity, "Test", None)).dongle
     await reset_service.reset(dongle.id)
     assert not fake_reset_lock.is_locked(str(dongle.id))
 
@@ -210,7 +210,7 @@ async def test_reset_many_one_error_one_done(reset_service, enrollment_service, 
         enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
     )
     # Aucun modem pour ce dongle : connect laisse le dongle en ERROR.
-    d_bad = await enrollment_service.enroll(IdentityMaterial(imei="987654321098765"), "Test", "test.apn")
+    d_bad = (await enrollment_service.enroll(IdentityMaterial(imei="987654321098765"), "Test", "test.apn")).dongle
     d_bad.state = DongleState.ONLINE
     d_bad.interface_name = "wwan2"
     d_bad.route_table_id = 10002

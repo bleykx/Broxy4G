@@ -68,7 +68,7 @@ async def test_proxy_enrolled_before_dongle_connect_gets_distinct_slot(
     fake_modem.set_bearer_ip(MODEM_PATH, BEARER)
 
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
 
     result = await connection_service.connect(dongle.id)

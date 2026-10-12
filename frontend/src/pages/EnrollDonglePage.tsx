@@ -2,8 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { errorMessage } from '../lib/errors';
-import { DiscoveredDongle } from '../types/api';
+import { DiscoveredDongle, EnrollmentProxyCredentials } from '../types/api';
 import { DonglePicker } from '../components/DonglePicker';
+import { CredentialsDialog } from '../components/CredentialsDialog';
 
 export const EnrollDonglePage: React.FC = () => {
   const navigate = useNavigate();
@@ -15,6 +16,7 @@ export const EnrollDonglePage: React.FC = () => {
   
   const [label, setLabel] = useState('');
   const [apn, setApn] = useState('');
+  const [credentials, setCredentials] = useState<{ dongleId: string } & EnrollmentProxyCredentials | null>(null);
 
   const fetchDiscovered = async () => {
     setLoading(true);
@@ -58,6 +60,11 @@ export const EnrollDonglePage: React.FC = () => {
         identity_usb_serial: selectedDongle.identity_usb_serial,
         identity_iccid: selectedDongle.identity_iccid,
       });
+      if (dongle.proxy_credentials) {
+        // One-time credentials: show them before leaving this page.
+        setCredentials({ dongleId: dongle.id, ...dongle.proxy_credentials });
+        return;
+      }
       navigate(`/dongles/${dongle.id}`);
     } catch (e) {
       setError(errorMessage(e));
@@ -145,6 +152,16 @@ export const EnrollDonglePage: React.FC = () => {
           </form>
         </section>
       </div>
+
+      <CredentialsDialog
+        open={credentials !== null}
+        username={credentials?.username ?? ''}
+        password={credentials?.password ?? ''}
+        onClose={() => {
+          if (credentials) navigate(`/dongles/${credentials.dongleId}`);
+          setCredentials(null);
+        }}
+      />
     </div>
   );
 };

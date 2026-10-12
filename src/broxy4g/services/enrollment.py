@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from uuid import UUID
 
 from broxy4g.adapters.modem_manager import ModemManagerAdapter
@@ -6,12 +7,26 @@ from broxy4g.domain.apn_resolution import ApnResolver
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
+from broxy4g.domain.proxy_credentials import ProxyCredentials
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.settings_repository import AUTO_CREATE_PROXY_KEY, SettingsRepository
 from broxy4g.services.connection import ConnectionService
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class EnrollmentResult:
+    """Résultat d'un enrôlement.
+
+    ``proxy_credentials`` (dont le mot de passe clair transitoire) n'est rempli
+    que si un nouveau proxy a été provisionné pendant cet appel ; il ne doit
+    jamais être persisté ni loggué.
+    """
+
+    dongle: Dongle
+    proxy_credentials: ProxyCredentials | None = None
 
 
 class EnrollmentService:
@@ -31,7 +46,9 @@ class EnrollmentService:
         self.apn_source = apn_source
         self.settings_repo = settings_repo
 
-    async def enroll(self, identity: IdentityMaterial, label: str, apn: str | None) -> Dongle:
+    async def enroll(
+        self, identity: IdentityMaterial, label: str, apn: str | None
+    ) -> EnrollmentResult:
         if not identity.is_complete:
             raise ValueError("Identity material is incomplete")
 
@@ -43,20 +60,27 @@ class EnrollmentService:
         dongle = Dongle(identity=identity, label=label, apn=resolved_apn)
         dongle.change_state(DongleState.CONFIGURING)
         await self.dongle_repo.save(dongle)
-        await self._maybe_create_proxy(dongle)
-        return dongle
+        credentials = await self._maybe_create_proxy(dongle)
+        return EnrollmentResult(dongle=dongle, proxy_credentials=credentials)
 
-    async def _maybe_create_proxy(self, dongle: Dongle) -> None:
-        """Crée automatiquement le proxy du dongle si l'option est activée."""
+    async def _maybe_create_proxy(self, dongle: Dongle) -> ProxyCredentials | None:
+        """Crée automatiquement le proxy du dongle si l'option est activée.
+
+        Retourne les identifiants générés seulement si un nouveau proxy a été
+        provisionné ; ``None`` si l'option est désactivée, si un proxy existe
+        déjà (chemin idempotent) ou si la création a échoué.
+        """
         if self.proxy_service is None:
-            return
+            return None
         if self.settings_repo is not None:
             if not await self.settings_repo.get_bool(AUTO_CREATE_PROXY_KEY, True):
-                return
+                return None
         try:
-            await self.proxy_service.create(dongle.id, enabled=True)
+            provisioned = await self.proxy_service.create(dongle.id, enabled=True)
         except Exception:
             logger.exception("Création automatique du proxy échouée pour dongle %s", dongle.id)
+            return None
+        return provisioned.credentials
 
     async def _resolve_apn(self, identity: IdentityMaterial) -> str | None:
         """Déduit l'APN depuis le modem correspondant à l'identité fournie."""

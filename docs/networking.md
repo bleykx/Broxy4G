@@ -227,6 +227,42 @@ it never changes the egress pinning.
   an error that stops a proxy or crashes reconciliation — it only withholds the
   publication until the interface is back.
 
+## Auto-réparation du bridge proxy et sonde de santé
+
+### Auto-réparation du bridge du réseau proxy
+
+Le réseau Docker `broxy4g-net` est créé **implicitement** au premier
+`docker compose up`. À chaque cycle de réconciliation, une étape
+(`ProxyNetworkService.ensure_gateway`, `services/proxy_network.py`) garantit
+que le device bridge du réseau porte bien son IP passerelle
+(`172.28.0.1` + préfixe `16`), de façon **idempotente** : adresse déjà
+présente → aucune écriture ; réseau absent → premier démarrage → no-op
+silencieux. Ne jamais `flush` ni supprimer d'adresse sur ce bridge : il
+porte potentiellement des conteneurs actifs.
+
+Mode de panne évité : sans cette IP, la table `main` perd sa route connectée
+vers `172.28.0.0/16` et les paquets DNATés vers les proxys
+(`172.28.0.10x:3128`) sont **droppés silencieusement** — timeouts côté
+client, sans RST ni ICMP. Ré-affirmer l'adresse suffit : le noyau réinstalle
+la route connectée et la passerelle redevient atteignable.
+
+### Détection via la sonde de santé proxy
+
+La sonde TCP du service de santé (`ProxyHealthService`,
+`services/proxy_health.py`) ne teste pas un listener local de l'hôte : le
+port publié est servi par DNAT, pas par un processus d'hôte. Elle cible
+donc le **port publié** (`proxy.listen_port`) sur **l'adresse qu'un client
+du LAN utiliserait** : l'interface d'écoute configurée, sinon la première
+interface ethernet (puis wifi) portant une IPv4.
+Le chemin testé depuis l'hôte est ainsi le chemin publié : chaîne OUTPUT →
+DNAT → route → conteneur ; la panne du bridge ci-dessus est détectée
+(`unhealthy`, raison `port publié non joignable depuis le LAN (…)`).
+
+Limite explicite : partant de l'hôte, la sonde ne couvre pas un drop dans
+la chaîne FORWARD (le parcours d'ingrès d'un paquet venant du LAN n'est pas
+reproduit). Sans namespace réseau dédié, ce n'est pas mesurable depuis
+l'hôte — c'est un choix assumé, à ne pas « corriger » par la sonde.
+
 ## Isolation Guarantees
 
 1. **Network Isolation**: Each dongle's traffic is completely separated from others

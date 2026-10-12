@@ -39,6 +39,28 @@ class ProxyListenService:
         logger.warning("Interface d'écoute %s absente ou sans IPv4 ; port proxy non publié", name)
         return None
 
+    async def resolve_published_ip(self) -> str | None:
+        """Adresse à utiliser pour joindre le port publié depuis le LAN.
+
+        Interface d'écoute configurée : son IPv4 (comportement de
+        ``resolve_bind_ip``), même si d'autres interfaces existent. Sans
+        interface configurée, le bind est ``0.0.0.0`` (publié partout) : on
+        retourne alors la première interface hôte avec IPv4, ethernet d'abord,
+        puis wifi, puis other (la liste étant triée par nom, le résultat est
+        déterministe). Repli ``127.0.0.1`` si aucune interface exploitable
+        (seul un proxy userland local pourrait alors répondre) : jamais
+        ``None`` dans ce cas. ``None`` uniquement si le port n'est pas publié.
+        """
+        bind = await self.resolve_bind_ip()
+        if bind is None or bind != DEFAULT_BIND_IP:
+            return bind
+        interfaces = await self._local_uplink.list_interfaces()
+        for kind in ("ethernet", "wifi", "other"):
+            for iface in interfaces:
+                if iface.kind == kind and iface.ip:
+                    return iface.ip
+        return "127.0.0.1"
+
     async def set_interface(self, name: str | None) -> str | None:
         if not name:
             await self._settings_repo.set(LISTEN_INTERFACE_KEY, "")

@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 
 from broxy4g.adapters.connectivity_real import RealConnectivity
 from broxy4g.adapters.docker_compose import RealDockerCompose
+from broxy4g.adapters.docker_network import RealDockerNetwork
 from broxy4g.adapters.local_uplink import RealLocalUplink
 from broxy4g.adapters.modem_manager_real import RealModemManager
 from broxy4g.adapters.net_interface import RealInterface
@@ -22,6 +23,7 @@ from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.database import create_engine, create_session_factory, init_db
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
+from broxy4g.services.proxy_network import ProxyNetworkService
 from broxy4g.services.routing_slot_migration import RoutingSlotMigration
 from broxy4g.services.uplink_routes import UplinkRouteService
 from broxy4g.services.usb_recovery import UsbRecoveryService
@@ -81,7 +83,8 @@ async def run_workers(app, stop_event: asyncio.Event, work_dir: str):
     routing = RealRouting(shell)
     nft = RealNftables(shell, work_dir=work_dir)
     connectivity = RealConnectivity(shell)
-    
+    proxy_network = ProxyNetworkService(RealDockerNetwork(shell), RealInterface(shell))
+
     discovery = DiscoveryWorker(modem, app.state.dongle_repo, apn_source=app.state.apn_source)
     worker_uplink_routes = UplinkRouteService(modem, routing)
     usb_recovery = UsbRecoveryService(
@@ -107,6 +110,7 @@ async def run_workers(app, stop_event: asyncio.Event, work_dir: str):
         reset_lock=app.state.reset_lock,
         local_connections=app.state.local_connections_service,
         usb_recovery=usb_recovery,
+        proxy_network=proxy_network,
     )
 
     async def discovery_loop():

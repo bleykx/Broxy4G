@@ -7,6 +7,7 @@ from broxy4g.api.deps import (
     get_discovery_service,
     get_enrollment_service,
     get_metrics_snapshot,
+    get_proxy_health_service,
     get_reset_service,
     require_auth,
 )
@@ -20,6 +21,10 @@ from broxy4g.api.schemas.dongle import (
     PingResultDTO,
     SignalQualityDTO,
 )
+from broxy4g.api.schemas.dongle_enrollment import (
+    DongleEnrollmentResponse,
+    EnrollmentProxyCredentials,
+)
 from broxy4g.api.schemas.reset import (
     ResetBatchItem,
     ResetBatchResult,
@@ -31,8 +36,9 @@ from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.services.connection import ConnectionService
 from broxy4g.services.discovery import DiscoveredDongle as ServiceDiscoveredDongle
 from broxy4g.services.discovery import DiscoveryService
-from broxy4g.services.enrollment import EnrollmentService
+from broxy4g.services.enrollment import EnrollmentResult, EnrollmentService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot, SummaryMetrics
+from broxy4g.services.proxy_health import ProxyHealth, ProxyHealthService
 from broxy4g.services.reset import ResetService
 
 router = APIRouter(dependencies=[Depends(require_auth)])
@@ -49,7 +55,7 @@ def _to_summary(d: Dongle, metrics: SummaryMetrics | None = None) -> DongleSumma
     )
 
 
-def _to_detail(d: Dongle, metrics=None) -> DongleDetail:
+def _to_detail(d: Dongle, metrics=None, health: ProxyHealth | None = None) -> DongleDetail:
     metrics_dto = None
     if metrics:
         metrics_dto = DongleMetricsDTO(
@@ -57,6 +63,7 @@ def _to_detail(d: Dongle, metrics=None) -> DongleDetail:
             ping=PingResultDTO(**metrics.ping.__dict__) if metrics.ping else None,
             public_ip=metrics.public_ip,
             proxy_health=metrics.proxy_health,
+            proxy_health_reason=health.reason if health else None,
         )
     return DongleDetail(
         id=d.id,
@@ -75,6 +82,19 @@ def _to_detail(d: Dongle, metrics=None) -> DongleDetail:
         created_at=d.created_at.isoformat(),
         updated_at=d.updated_at.isoformat(),
         metrics=metrics_dto,
+    )
+
+
+def _to_enrollment_response(result: EnrollmentResult) -> DongleEnrollmentResponse:
+    """Construit la réponse one-time de l'enrôlement (identifiants le cas échéant)."""
+    credentials = result.proxy_credentials
+    return DongleEnrollmentResponse(
+        **_to_detail(result.dongle).model_dump(),
+        proxy_credentials=(
+            EnrollmentProxyCredentials(username=credentials.username, password=credentials.password)
+            if credentials is not None
+            else None
+        ),
     )
 
 
@@ -104,7 +124,7 @@ async def list_discovered_dongles(svc: DiscoveryService = Depends(get_discovery_
     return [_to_discovered_dongle(d) for d in discovered]
 
 
-@router.post("/dongles", response_model=DongleDetail, status_code=status.HTTP_201_CREATED)
+@router.post("/dongles", response_model=DongleEnrollmentResponse, status_code=status.HTTP_201_CREATED)
 async def enroll_dongle(
     body: DongleCreate, svc: EnrollmentService = Depends(get_enrollment_service)
 ):
@@ -112,11 +132,11 @@ async def enroll_dongle(
         imei=body.identity_imei, usb_serial=body.identity_usb_serial, iccid=body.identity_iccid
     )
     try:
-        dongle = await svc.enroll(identity, body.label, body.apn)
+        result = await svc.enroll(identity, body.label, body.apn)
     except ValueError as e:
         code = 409 if "already enrolled" in str(e) else 422
         raise HTTPException(status_code=code, detail=str(e))
-    return _to_detail(dongle)
+    return _to_enrollment_response(result)
 
 
 @router.post("/dongles/reset", response_model=ResetBatchResult)
@@ -134,12 +154,15 @@ async def get_dongle(
     dongle_id: UUID,
     svc: EnrollmentService = Depends(get_enrollment_service),
     conn: ConnectionService = Depends(get_connection_service),
+    health_svc: ProxyHealthService = Depends(get_proxy_health_service),
 ):
     dongle = await svc.get_by_id(dongle_id)
     if not dongle:
         raise HTTPException(status_code=404, detail="Dongle not found")
     metrics = await conn.get_metrics(dongle_id)
-    return _to_detail(dongle, metrics)
+    health = await health_svc.for_dongle(dongle_id)
+    metrics.proxy_health = health.status
+    return _to_detail(dongle, metrics, health)
 
 
 @router.patch("/dongles/{dongle_id}", response_model=DongleDetail)

@@ -26,7 +26,7 @@ def add_modem(
 
 async def _enroll_with_routing(enrollment_service, interface="wwan0"):
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = interface
     dongle.route_table_id = 10001
     dongle.fwmark = 1
@@ -93,7 +93,7 @@ async def test_reconcile_resetting_with_lock_skips_connect(
 ):
     """RESETTING + verrou tenu = reset réellement en cours → restauration sautée."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.change_state(DongleState.CONNECTING)
     dongle.change_state(DongleState.ONLINE)
     dongle.change_state(DongleState.RESETTING)
@@ -111,7 +111,7 @@ async def test_reconcile_resetting_with_lock_fully_ignored(
 ):
     """RESETTING + verrou tenu : connexion, proxy ET connectivité sont totalement ignorés."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.change_state(DongleState.CONNECTING)
     dongle.change_state(DongleState.ONLINE)
     dongle.change_state(DongleState.RESETTING)
@@ -188,6 +188,63 @@ async def test_reconcile_all_repairs_slot_duplicates_before_dongles(
         await reconciliation_worker.reconcile_all()
 
     assert calls == ["migration", "dongle"]
+
+
+async def test_reconcile_all_order_proxies_network_isolation(reconciliation_worker):
+    """Ordre du cycle : proxies → passerelle réseau proxy → isolation."""
+    calls: list[str] = []
+
+    async def record_proxies():
+        calls.append("proxies")
+
+    async def record_network():
+        calls.append("proxy_network")
+
+    async def record_isolation():
+        calls.append("isolation")
+
+    with (
+        patch.object(
+            reconciliation_worker,
+            "reconcile_proxies",
+            new=AsyncMock(side_effect=record_proxies),
+        ),
+        patch.object(
+            reconciliation_worker,
+            "_ensure_proxy_network",
+            new=AsyncMock(side_effect=record_network),
+        ),
+        patch.object(
+            reconciliation_worker,
+            "_reapply_isolation",
+            new=AsyncMock(side_effect=record_isolation),
+        ),
+    ):
+        await reconciliation_worker.reconcile_all()
+
+    assert calls == ["proxies", "proxy_network", "isolation"]
+
+
+async def test_reconcile_all_proxy_network_failure_does_not_break_cycle(
+    reconciliation_worker,
+):
+    """ensure_gateway qui lève : le cycle se termine et l'isolation est appliquée."""
+
+    async def boom():
+        raise RuntimeError("bridge indisponible")
+
+    with (
+        patch.object(
+            reconciliation_worker.proxy_network,
+            "ensure_gateway",
+            new=AsyncMock(side_effect=boom),
+        ) as mock_ensure,
+        patch.object(reconciliation_worker, "_reapply_isolation") as mock_isolation,
+    ):
+        await reconciliation_worker.reconcile_all()
+
+    mock_ensure.assert_awaited_once()
+    mock_isolation.assert_awaited_once()
 
 
 async def test_reconcile_all_repairs_duplicate_slot_and_repins_local_proxy(

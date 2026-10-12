@@ -14,6 +14,7 @@ from broxy4g.services.connection import ConnectionService
 from broxy4g.services.local_connections import LocalConnectionsService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot
 from broxy4g.services.network_isolation import NetworkIsolationService
+from broxy4g.services.proxy_network import ProxyNetworkService
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.routing_slot_migration import RoutingSlotMigration
 from broxy4g.services.uplink_routes import UplinkRouteService
@@ -44,6 +45,7 @@ class ReconciliationWorker:
         reset_lock: ResetLock | None = None,
         local_connections: LocalConnectionsService | None = None,
         usb_recovery: UsbRecoveryService | None = None,
+        proxy_network: ProxyNetworkService | None = None,
     ):
         self.dongle_repo = dongle_repo
         self.proxy_repo = proxy_repo
@@ -61,6 +63,7 @@ class ReconciliationWorker:
         self.reset_lock = reset_lock
         self.local_connections = local_connections
         self.usb_recovery = usb_recovery
+        self.proxy_network = proxy_network
         self.proxy_reconciler = ProxyReconciler(
             proxy_repo=proxy_repo,
             dongle_repo=dongle_repo,
@@ -81,6 +84,7 @@ class ReconciliationWorker:
             except Exception:
                 logger.exception("Reconciliation échouée pour dongle %s", dongle.id)
         await self.reconcile_proxies()
+        await self._ensure_proxy_network()
         await self._reapply_isolation()
 
     async def _repair_slot_duplicates(self) -> None:
@@ -92,6 +96,18 @@ class ReconciliationWorker:
             await self.slot_migration.repair_duplicates()
         except Exception:
             logger.exception("Échec réparation doublons de slots de routage")
+
+    async def _ensure_proxy_network(self) -> None:
+        """Vérifie la passerelle du bridge du réseau proxy.
+
+        Un échec de cette étape ne doit pas faire échouer tout le cycle.
+        """
+        if self.proxy_network is None:
+            return
+        try:
+            await self.proxy_network.ensure_gateway()
+        except Exception:
+            logger.exception("Échec vérification passerelle réseau proxy")
 
     async def _reapply_isolation(self) -> None:
         """Réaligne la table nftables d'isolation sur l'état persisté."""

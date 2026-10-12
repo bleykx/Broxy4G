@@ -23,7 +23,7 @@ def add_modem(fake_modem, path=MODEM_PATH, imei="123456789012345", interface="ww
 @pytest.mark.asyncio
 async def test_connect_transitions_to_online(connection_service, enrollment_service, fake_modem):
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     dongle.route_table_id = 10001
     dongle.fwmark = 1
@@ -38,7 +38,7 @@ async def test_connect_transitions_to_online(connection_service, enrollment_serv
 @pytest.mark.asyncio
 async def test_disconnect_transitions_to_offline(connection_service, enrollment_service, fake_modem):
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     add_modem(fake_modem)
     await connection_service.connect(dongle.id)
@@ -50,7 +50,7 @@ async def test_disconnect_transitions_to_offline(connection_service, enrollment_
 @pytest.mark.asyncio
 async def test_disconnect_removes_routing_rules(connection_service, enrollment_service, fake_routing):
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     dongle.route_table_id = 10001
     dongle.fwmark = 1
@@ -70,7 +70,7 @@ async def test_get_metrics_returns_metrics(
     connection_service, enrollment_service, fake_iface, fake_connectivity
 ):
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     fake_iface.set_address("wwan0", "10.159.25.48")
     await enrollment_service.dongle_repo.save(dongle)
@@ -87,7 +87,7 @@ async def test_get_metrics_pins_active_source(
 ):
     """Les probes sont épinglés à l'IP source du bearer, jamais au nom d'interface."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     fake_iface.set_address("wwan0", "10.159.25.48")
     await enrollment_service.dongle_repo.save(dongle)
@@ -104,7 +104,7 @@ async def test_get_metrics_without_source_skips_probes(
 ):
     """Sans IP source, aucun probe n'est lancé (pas de fuite par la table main)."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
 
     metrics = await connection_service.get_metrics(dongle.id)
@@ -117,7 +117,7 @@ async def test_get_metrics_without_source_skips_probes(
 async def test_connect_handles_port_change(connection_service, enrollment_service, fake_modem):
     """connect resolves modem by identity when USB port changes."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     await enrollment_service.dongle_repo.save(dongle)
 
@@ -141,7 +141,7 @@ async def test_connect_handles_port_change(connection_service, enrollment_servic
 async def test_connect_handles_absent_modem(connection_service, enrollment_service, fake_modem):
     """connect transitions to ERROR when modem is absent."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
 
     with patch.object(fake_modem, "connect", new=AsyncMock()) as mock_connect:
@@ -158,7 +158,7 @@ async def test_connect_handles_absent_modem(connection_service, enrollment_servi
 async def test_disconnect_handles_resolved_path(connection_service, enrollment_service, fake_modem):
     """disconnect resolves modem by identity when USB port changes."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan1"
 
     add_modem(
@@ -179,7 +179,7 @@ async def test_disconnect_handles_resolved_path(connection_service, enrollment_s
 async def test_connect_modem_raises_error(connection_service, enrollment_service, fake_modem):
     """connect transitions to ERROR when modem.connect raises."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     dongle.route_table_id = 10001
     dongle.fwmark = 1
@@ -197,7 +197,7 @@ async def test_connect_modem_raises_error(connection_service, enrollment_service
 async def test_connect_ip_wait_timeout_error(connection_service, enrollment_service, fake_modem):
     """connect transitions to ERROR when no IP is assigned."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     dongle.route_table_id = 10001
     dongle.fwmark = 1
@@ -223,7 +223,7 @@ async def test_connect_persists_error_detail_on_modem_failure(
 ):
     """Lorsque modem.connect lève, le dongle persisté est en ERROR et last_error détaille l'erreur."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     dongle.route_table_id = 10001
     dongle.fwmark = 1
@@ -244,7 +244,7 @@ async def test_connect_persists_error_detail_on_modem_failure(
 async def test_connect_clears_error_on_success(connection_service, enrollment_service, fake_modem):
     """Après un connect réussi, last_error est remis à None."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     dongle.route_table_id = 10001
     dongle.fwmark = 1
@@ -262,7 +262,7 @@ async def test_connect_clears_error_on_success(connection_service, enrollment_se
 async def test_connect_flushes_stale_addresses(connection_service, enrollment_service, fake_modem, fake_iface):
     """Une IPv4 périmée est purgée avant l'assignation du bearer."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     dongle.route_table_id = 10001
     dongle.fwmark = 1
@@ -283,7 +283,7 @@ async def test_connect_never_renames_interface(
     """L'application ne renomme jamais un netdev : le nom persisté est celui
     du netdev résolu par l'adaptateur (sysfs)."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.route_table_id = 10001
     dongle.fwmark = 1
     add_modem(fake_modem)
@@ -301,7 +301,7 @@ async def test_connect_modem_without_interface_fails(
 ):
     """Modem trouvé mais sans port net → ERROR avec un message métier explicite."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     add_modem(fake_modem, interface=None)
 
@@ -324,7 +324,7 @@ async def test_connect_ppp_bearer_fails_with_ppp_message(
 ):
     """Bearer PPP sans interface réseau → message métier PPP, pas le générique."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     dongle.route_table_id = 10001
     dongle.fwmark = 1
@@ -359,7 +359,7 @@ async def test_wait_for_ip_rejects_stale_address(
 ):
     """L'ancienne adresse ne doit jamais valider la connexion."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     dongle.route_table_id = 10001
     dongle.fwmark = 1
@@ -385,7 +385,7 @@ async def test_wait_for_ip_rejects_stale_address(
 async def test_disconnect_flushes_addresses(connection_service, enrollment_service, fake_modem, fake_iface):
     """disconnect purge l'IPv4 de l'interface."""
     identity = IdentityMaterial(imei="123456789012345")
-    dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
     add_modem(fake_modem)
     await connection_service.connect(dongle.id)

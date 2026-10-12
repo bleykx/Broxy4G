@@ -11,6 +11,9 @@ PROXY_PORT_END = 31299
 DOCKER_NETWORK_NAME = "broxy4g-net"
 DOCKER_SUBNET = "172.28.0.0/16"
 DOCKER_GATEWAY = "172.28.0.1"
+# Préfixe porté par le bridge Docker (172.28.0.1/16), utilisé pour ré-affirmer
+# la passerelle si elle a été perdue.
+DOCKER_GATEWAY_PREFIX = 16
 
 _FIRST_HOST_OCTET = 101
 

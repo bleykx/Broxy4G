@@ -41,6 +41,7 @@ export interface DongleMetrics {
   } | null;
   public_ip: string | null;
   proxy_health: 'healthy' | 'unhealthy' | 'unknown' | null;
+  proxy_health_reason: string | null;
 }
 
 export interface DongleDetail extends DongleSummary {
@@ -56,6 +57,15 @@ export interface DongleDetail extends DongleSummary {
   created_at: string;
   updated_at: string;
   metrics: DongleMetrics | null;
+}
+
+export interface EnrollmentProxyCredentials {
+  username: string;
+  password: string;
+}
+
+export interface DongleEnrollmentResponse extends DongleDetail {
+  proxy_credentials: EnrollmentProxyCredentials | null;
 }
 
 export interface ProxyDetail {

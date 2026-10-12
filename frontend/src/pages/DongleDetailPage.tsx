@@ -9,6 +9,8 @@ import { ProxyManagementCard } from '../components/ProxyManagementCard';
 import { ProxyAllowedHostsCard } from '../features/proxies/ProxyAllowedHostsCard';
 import { ResetIpControl } from '../components/ResetIpControl';
 import { MetricRow } from '../components/MetricRow';
+import { ProxyHealth } from '../components/ProxyHealth';
+import { useCopyToClipboard } from '../lib/useCopyToClipboard';
 
 type Notice = { kind: 'success' | 'warning' | 'error'; text: string } | null;
 
@@ -81,8 +83,7 @@ export const DongleDetailPage: React.FC = () => {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [endpointCopy, setEndpointCopy] = useState<'idle' | 'copied' | 'failed'>('idle');
-  const endpointCopyTimer = useRef<number | null>(null);
+  const endpointCopy = useCopyToClipboard();
   const editingRef = useRef(false);
 
   const loadData = useCallback(async () => {
@@ -108,10 +109,6 @@ export const DongleDetailPage: React.FC = () => {
     const interval = setInterval(loadData, 15000);
     return () => clearInterval(interval);
   }, [loadData]);
-
-  useEffect(() => () => {
-    if (endpointCopyTimer.current) window.clearTimeout(endpointCopyTimer.current);
-  }, []);
 
   const toggleEditing = () => {
     const next = !editingRef.current;
@@ -154,19 +151,6 @@ export const DongleDetailPage: React.FC = () => {
   if (!id) return null;
 
   const resetUrl = `${window.location.origin}/api/v1/dongles/${id}/reset`;
-
-  const copyResetUrl = async () => {
-    if (endpointCopyTimer.current) window.clearTimeout(endpointCopyTimer.current);
-    let failed = false;
-    try {
-      await navigator.clipboard.writeText(resetUrl);
-    } catch {
-      // Clipboard unavailable: the URL remains selectable below.
-      failed = true;
-    }
-    setEndpointCopy(failed ? 'failed' : 'copied');
-    endpointCopyTimer.current = window.setTimeout(() => setEndpointCopy('idle'), failed ? 4000 : 1500);
-  };
 
   if (loading) {
     return (
@@ -238,13 +222,13 @@ export const DongleDetailPage: React.FC = () => {
             value={
               <div className="endpoint-copy">
                 <span className="mono endpoint-url" title={resetUrl}>{resetUrl}</span>
-                <button className="btn" onClick={copyResetUrl}>
-                  {endpointCopy === 'copied' ? 'Copied' : 'Copy'}
+                <button className="btn" onClick={() => endpointCopy.copy(resetUrl)}>
+                  {endpointCopy.status === 'copied' ? 'Copied' : endpointCopy.status === 'failed' ? 'Failed' : 'Copy'}
                 </button>
               </div>
             }
           />
-          {endpointCopy === 'failed' && (
+          {endpointCopy.status === 'failed' && (
             <p className="endpoint-hint">Copy failed. Select the URL and copy it manually.</p>
           )}
         </div>
@@ -265,6 +249,10 @@ export const DongleDetailPage: React.FC = () => {
           {signal?.rsrq != null && <MetricRow label="RSRQ" value={<span className="mono">{signal.rsrq} dB</span>} />}
           {signal?.sinr != null && <MetricRow label="SINR" value={<span className="mono">{signal.sinr} dB</span>} />}
           <MetricRow label="Avg Ping" value={<span className="mono">{dongle.metrics?.ping?.avg_ms ?? '—'} ms</span>} />
+          <ProxyHealth
+            health={dongle.metrics?.proxy_health ?? null}
+            reason={dongle.metrics?.proxy_health_reason ?? null}
+          />
         </div>
 
         <ProxyManagementCard dongleId={id} proxy={proxy} onChanged={loadData} actionsDisabled={editing} />

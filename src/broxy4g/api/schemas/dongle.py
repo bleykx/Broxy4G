@@ -39,6 +39,7 @@ class DongleMetricsDTO(BaseModel):
     ping: PingResultDTO | None = None
     public_ip: str | None = None
     proxy_health: str | None = None
+    proxy_health_reason: str | None = None
 
 
 class DiscoveredDongle(BaseModel):

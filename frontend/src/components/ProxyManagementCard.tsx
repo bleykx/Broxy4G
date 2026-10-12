@@ -93,7 +93,7 @@ export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({ dongle
               {busy === 'restart' ? 'Restarting…' : 'Restart'}
             </button>
             <button className="btn" disabled={disabled} onClick={() => openConfirm('rotate')}>
-              Rotate Credentials
+              View credentials
             </button>
             <button className="btn btn-danger-text" disabled={disabled} onClick={() => openConfirm('delete')}>
               Delete

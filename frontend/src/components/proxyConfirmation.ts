@@ -15,9 +15,9 @@ export const PROXY_CONFIRM: Record<ProxyConfirmKind, {
     destructive: true,
   },
   rotate: {
-    title: 'Rotate credentials',
-    message: 'Generate new proxy credentials? Existing clients are disconnected until updated with the new password, which is shown only once.',
-    confirmLabel: 'Rotate',
-    busyLabel: 'Rotating…',
+    title: 'View credentials',
+    message: 'The password was never stored, so viewing it regenerates a new one. Existing clients are disconnected until updated with the new password, which is shown only once.',
+    confirmLabel: 'Regenerate',
+    busyLabel: 'Regenerating…',
   },
 };

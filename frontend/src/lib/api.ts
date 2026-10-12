@@ -1,6 +1,7 @@
 import {
   DongleSummary,
   DongleDetail,
+  DongleEnrollmentResponse,
   ProxyDetail,
   ProxyWithPassword,
   ResetResponse,
@@ -72,8 +73,8 @@ export const api = {
     list: () => request<DongleSummary[]>('/dongles'),
     discovered: () => request<DiscoveredDongle[]>('/dongles/discovered'),
     get: (id: string) => request<DongleDetail>(`/dongles/${id}`),
-    create: (data: Partial<DongleDetail>) => 
-      request<DongleDetail>('/dongles', {
+    create: (data: Partial<DongleDetail>) =>
+      request<DongleEnrollmentResponse>('/dongles', {
         method: 'POST',
         body: JSON.stringify(data),
       }),

@@ -88,7 +88,8 @@ Returns details for a specific dongle.
       "max_ms": 33.7
     },
     "public_ip": "37.167.72.57",
-    "proxy_health": "healthy"
+    "proxy_health": "healthy",
+    "proxy_health_reason": null
   }
 }
 ```
@@ -110,6 +111,26 @@ Returns details for a specific dongle.
 > **Error detail:** `last_error` holds the detail of the last failure (exception
 > type and message, or the reason such as an absent modem). It is populated when
 > the dongle is in state `ERROR` and reset to `null` after a successful connect.
+>
+> **Proxy health:** `metrics.proxy_health` is computed live on each GET and
+> reflects whether the dongle's 3proxy is actually usable, not just its stored
+> state. Values:
+>
+> - `healthy` — the proxy is enabled, its container is `running`, its port is
+>   published and reachable in TCP. `proxy_health_reason` is `null`.
+> - `unhealthy` — something is wrong and `proxy_health_reason` explains which:
+>   the container is not running (`conteneur non actif (state=...)`), the port
+>   is not published because the configured listen interface is absent or has
+>   no IPv4 (`port non publié : interface d'écoute absente ou sans IPv4`), or
+>   the published port is not reachable from the LAN
+>   (`port publié non joignable depuis le LAN (<ip>:<port>)` — the probe
+>   targets the published port on the address a LAN client would use).
+> - `unknown` — no health check applies: the dongle has no proxy
+>   (`aucun proxy`) or its proxy is disabled (`proxy désactivé`).
+>
+> This is what turns the former silent failure (container `running` but port
+> not published because the listen interface vanished) into an explicit
+> `unhealthy` with a reason.
 
 #### Get Discovered Dongles
 
@@ -170,9 +191,28 @@ Enrolls a new dongle.
   "last_error": null,
   "created_at": "2023-01-01T12:00:00Z",
   "updated_at": "2023-01-01T12:00:00Z",
-  "metrics": null
+  "metrics": null,
+  "proxy_credentials": {
+    "username": "khmtpznwqrbv",
+    "password": "nHkq2z4vXw8mPq6rTn3j"
+  }
 }
 ```
+
+The response is a dedicated `DongleEnrollmentResponse` (the `DongleDetail` shape
+plus one extra field):
+
+- `proxy_credentials` (`{ "username", "password" }`) is filled **only if this
+  enrollment call provisioned a brand new proxy** (auto-create enabled). The
+  plaintext password is returned **once, in this response only** — it is never
+  persisted, logged, or returned by any other endpoint.
+- `proxy_credentials` is `null` when no new proxy was created: auto-create is
+  disabled (`PUT /api/v1/settings/proxy-auto-create`), or a proxy already
+  exists for the dongle.
+
+The GET endpoints (`GET /api/v1/dongles/{id}`, `GET /api/v1/dongles/{id}/proxy`)
+never include `proxy_credentials` nor a plaintext password; they expose only
+`auth_user` (the proxy username) and the state.
 
 #### Connect Dongle
 

@@ -11,12 +11,13 @@ from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.services.discovery import DiscoveredDongle
+from broxy4g.services.proxy_health import ProxyHealthService
 
 
 async def _enroll_online_via_app(app, imei, interface, table_id, fwmark) -> Dongle:
     """Enrôle un dongle via l'app, le passe en ONLINE avec modem+bearer prêts pour un reset DONE."""
     enrollment_service = app.state.enrollment_service
-    dongle = await enrollment_service.enroll(IdentityMaterial(imei=imei), "Test", "test.apn")
+    dongle = (await enrollment_service.enroll(IdentityMaterial(imei=imei), "Test", "test.apn")).dongle
     dongle.state = DongleState.ONLINE
     dongle.interface_name = interface
     dongle.route_table_id = table_id
@@ -101,6 +102,42 @@ class TestDonglesApi:
         assert data[0]["signal_quality"] == 85
 
 
+class TestEnrollApi:
+    async def test_enroll_returns_proxy_credentials_once(self, client, auth_headers):
+        payload = {"identity_imei": "123456789012345", "label": "Dongle 1234"}
+        response = await client.post("/api/v1/dongles", json=payload, headers=auth_headers)
+
+        assert response.status_code == 201
+        data = response.json()
+        creds = data["proxy_credentials"]
+        assert creds is not None
+        assert creds["username"]
+        assert creds["password"]
+        dongle_id = data["id"]
+
+        # Les GET suivants ne renveront jamais les identifiants en clair.
+        detail = (await client.get(f"/api/v1/dongles/{dongle_id}", headers=auth_headers)).json()
+        assert "proxy_credentials" not in detail
+        assert "password" not in detail
+
+        proxy = (await client.get(f"/api/v1/dongles/{dongle_id}/proxy", headers=auth_headers)).json()
+        assert proxy["auth_user"] == creds["username"]
+        assert "password" not in proxy
+
+    async def test_enroll_credentials_null_when_auto_create_disabled(self, client, auth_headers):
+        await client.put(
+            "/api/v1/settings/proxy-auto-create", json={"enabled": False}, headers=auth_headers
+        )
+        response = await client.post(
+            "/api/v1/dongles",
+            json={"identity_imei": "987654321098765", "label": "Dongle auto off"},
+            headers=auth_headers,
+        )
+
+        assert response.status_code == 201
+        assert response.json()["proxy_credentials"] is None
+
+
 class TestResetApi:
     async def test_reset_single_returns_done(self, client, app, auth_headers):
         dongle = await _enroll_online_via_app(app, "123456789012345", "wwan0", 10001, 1)
@@ -162,3 +199,61 @@ class TestResetApi:
         )
 
         assert response.status_code == 422
+
+
+class TestProxyHealthApi:
+    async def test_detail_exposes_healthy_proxy(self, client, app, auth_headers):
+        response = await client.post(
+            "/api/v1/dongles",
+            json={"identity_imei": "555666777888999", "label": "Dongle santé"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+        dongle_id = response.json()["id"]
+
+        # Le conteneur est "running" (FakeDockerCompose) mais aucun port n'est
+        # réellement ouvert : on injecte un probe pour isoler le critère TCP.
+        async def _reachable(host: str, port: int) -> bool:
+            return True
+
+        app.state.proxy_health_service = ProxyHealthService(
+            app.state.proxy_repo,
+            app.state.docker_compose,
+            app.state.proxy_listen_service,
+            probe=_reachable,
+        )
+
+        detail = (await client.get(f"/api/v1/dongles/{dongle_id}", headers=auth_headers)).json()
+        assert detail["metrics"]["proxy_health"] == "healthy"
+        assert detail["metrics"]["proxy_health_reason"] is None
+
+    async def test_detail_exposes_unhealthy_when_port_not_reachable(self, client, app, auth_headers):
+        response = await client.post(
+            "/api/v1/dongles",
+            json={"identity_imei": "333444555666777", "label": "Dongle injoignable"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+        dongle_id = response.json()["id"]
+
+        # Probe par défaut (vrai TCP sur 127.0.0.1) : FakeDockerCompose n'ouvre
+        # pas de port → l'échec silencieux de publication est maintenant visible.
+        detail = (await client.get(f"/api/v1/dongles/{dongle_id}", headers=auth_headers)).json()
+        assert detail["metrics"]["proxy_health"] == "unhealthy"
+        assert "non joignable" in detail["metrics"]["proxy_health_reason"]
+
+    async def test_detail_exposes_unknown_when_no_proxy(self, client, app, auth_headers):
+        await client.put(
+            "/api/v1/settings/proxy-auto-create", json={"enabled": False}, headers=auth_headers
+        )
+        response = await client.post(
+            "/api/v1/dongles",
+            json={"identity_imei": "444555666777888", "label": "Dongle sans proxy"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+        dongle_id = response.json()["id"]
+
+        detail = (await client.get(f"/api/v1/dongles/{dongle_id}", headers=auth_headers)).json()
+        assert detail["metrics"]["proxy_health"] == "unknown"
+        assert detail["metrics"]["proxy_health_reason"] == "aucun proxy"

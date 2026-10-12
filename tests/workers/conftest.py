@@ -2,6 +2,7 @@ import pytest
 
 from broxy4g.adapters.connectivity import FakeConnectivity
 from broxy4g.adapters.docker_compose import FakeDockerCompose
+from broxy4g.adapters.docker_network import FakeDockerNetwork
 from broxy4g.adapters.local_uplink import FakeLocalUplink
 from broxy4g.adapters.modem_manager import FakeModemManager
 from broxy4g.adapters.net_interface import FakeInterface
@@ -21,6 +22,7 @@ from broxy4g.services.metrics_snapshot import MetricsSnapshot
 from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.proxy_files import ProxyFileWriter, ProxyPaths
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
+from broxy4g.services.proxy_network import ProxyNetworkService
 from broxy4g.services.proxy_ports import PortAllocator
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.reset import ResetService
@@ -65,6 +67,16 @@ def fake_docker_compose():
 @pytest.fixture
 def fake_local_uplink():
     return FakeLocalUplink()
+
+
+@pytest.fixture
+def fake_docker_network():
+    return FakeDockerNetwork()
+
+
+@pytest.fixture
+def proxy_network_service(fake_docker_network, fake_iface):
+    return ProxyNetworkService(fake_docker_network, fake_iface)
 
 
 @pytest.fixture
@@ -226,7 +238,7 @@ def reconciliation_worker(
     dongle_repo, proxy_repo, fake_modem, fake_routing, fake_nft,
     fake_connectivity, connection_service, provisioning, fake_docker_compose, metrics_snapshot,
     uplink_routes, slot_migration, isolation, fake_reset_lock, local_connections,
-    usb_recovery,
+    usb_recovery, proxy_network_service,
 ):
     from broxy4g.workers.reconciliation import ReconciliationWorker
     return ReconciliationWorker(
@@ -246,4 +258,5 @@ def reconciliation_worker(
         reset_lock=fake_reset_lock,
         local_connections=local_connections,
         usb_recovery=usb_recovery,
+        proxy_network=proxy_network_service,
     )

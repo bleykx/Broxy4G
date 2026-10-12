@@ -1,4 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { useCopyToClipboard, CopyStatus } from '../lib/useCopyToClipboard';
 
 interface CredentialsDialogProps {
   open: boolean;
@@ -7,32 +9,34 @@ interface CredentialsDialogProps {
   onClose: () => void;
 }
 
+const copyLabel = (status: CopyStatus, base: string) =>
+  status === 'copied' ? 'Copied' : status === 'failed' ? 'Failed' : base;
+
 export const CredentialsDialog: React.FC<CredentialsDialogProps> = ({ open, username, password, onClose }) => {
-  const [copied, setCopied] = useState<'user' | 'pass' | 'both' | null>(null);
+  const { status: userStatus, copy: copyUser, reset: resetUser } = useCopyToClipboard();
+  const { status: passStatus, copy: copyPass, reset: resetPass } = useCopyToClipboard();
+  const { status: bothStatus, copy: copyBoth, reset: resetBoth } = useCopyToClipboard();
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
-    setCopied(null);
+    resetUser();
+    resetPass();
+    resetBoth();
     closeRef.current?.focus();
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  }, [open, onClose, resetUser, resetPass, resetBoth]);
 
   if (!open) return null;
 
-  const copy = async (value: string, which: 'user' | 'pass' | 'both') => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(which);
-      setTimeout(() => setCopied(null), 1500);
-    } catch {
-      // Clipboard unavailable: the values remain selectable below.
-    }
-  };
+  const copyFailed =
+    userStatus === 'failed' || passStatus === 'failed' || bothStatus === 'failed';
 
-  return (
+  // Mounted on document.body so a transformed ancestor (e.g. .card:hover)
+  // cannot become the containing block of this fixed overlay.
+  return createPortal(
     <div className="dialog-overlay" onMouseDown={onClose}>
       <div
         className="dialog"
@@ -49,29 +53,33 @@ export const CredentialsDialog: React.FC<CredentialsDialogProps> = ({ open, user
           <div className="credentials-row">
             <span className="metric-label">Username</span>
             <span className="mono">{username}</span>
-            <button className="btn" onClick={() => copy(username, 'user')}>
-              {copied === 'user' ? 'Copied' : 'Copy'}
+            <button className="btn" onClick={() => copyUser(username)}>
+              {copyLabel(userStatus, 'Copy')}
             </button>
           </div>
           <div className="credentials-row">
             <span className="metric-label">Password</span>
             <span className="mono">{password}</span>
-            <button className="btn" onClick={() => copy(password, 'pass')}>
-              {copied === 'pass' ? 'Copied' : 'Copy'}
+            <button className="btn" onClick={() => copyPass(password)}>
+              {copyLabel(passStatus, 'Copy')}
             </button>
           </div>
           <div className="credentials-row">
             <span className="metric-label">User:pass</span>
             <span className="mono">{`${username}:${password}`}</span>
-            <button className="btn btn-primary" onClick={() => copy(`${username}:${password}`, 'both')}>
-              {copied === 'both' ? 'Copied' : 'Copy both'}
+            <button className="btn btn-primary" onClick={() => copyBoth(`${username}:${password}`)}>
+              {copyLabel(bothStatus, 'Copy both')}
             </button>
           </div>
         </div>
+        {copyFailed && (
+          <p className="dialog-error">Copy failed. Select the value and copy it manually.</p>
+        )}
         <div className="dialog-actions">
           <button ref={closeRef} className="btn btn-primary" onClick={onClose}>Done</button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 };

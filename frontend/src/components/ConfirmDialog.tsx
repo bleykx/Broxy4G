@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -47,7 +48,9 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
 
   if (!open) return null;
 
-  return (
+  // Mounted on document.body so a transformed ancestor (e.g. .card:hover)
+  // cannot become the containing block of this fixed overlay.
+  return createPortal(
     <div className="dialog-overlay" onMouseDown={() => !busy && onCancel()}>
       <div
         className="dialog"
@@ -71,6 +74,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 };
