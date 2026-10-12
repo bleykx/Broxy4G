@@ -154,6 +154,71 @@ async def test_reconcile_all_no_dongles(reconciliation_worker, dongle_repo):
     await reconciliation_worker.reconcile_all()
 
 
+async def test_reconcile_all_repairs_slot_duplicates_before_dongles(
+    reconciliation_worker, enrollment_service
+):
+    """La migration des doublons de slots précède la boucle des dongles."""
+    await _enroll_with_routing(enrollment_service)
+    calls: list[str] = []
+
+    def record_migration():
+        calls.append("migration")
+
+    def record_dongle(_dongle_id):
+        calls.append("dongle")
+
+    with (
+        patch.object(
+            reconciliation_worker.slot_migration,
+            "repair_duplicates",
+            new=AsyncMock(side_effect=record_migration),
+        ),
+        patch.object(
+            reconciliation_worker,
+            "reconcile_dongle",
+            new=AsyncMock(side_effect=record_dongle),
+        ),
+        patch.object(reconciliation_worker, "reconcile_proxies", new=AsyncMock()),
+        patch.object(reconciliation_worker, "_reapply_isolation", new=AsyncMock()),
+    ):
+        await reconciliation_worker.reconcile_all()
+
+    assert calls == ["migration", "dongle"]
+
+
+async def test_reconcile_all_repairs_duplicate_slot_and_repins_local_proxy(
+    reconciliation_worker,
+    enrollment_service,
+    proxy_repo,
+    fake_modem,
+    fake_connectivity,
+    fake_local_uplink,
+    fake_routing,
+):
+    """End-to-end : le proxy local dupliqué sur le slot du dongle est ré-épinglé ailleurs."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    proxy = await _seed_local_proxy(proxy_repo, interface="eth0", table=10001, fwmark=1)
+    proxy.auth_user = "user"
+    proxy.password_hash = "CR:hash"
+    await proxy_repo.save(proxy)
+    add_modem(fake_modem)
+    fake_connectivity.set_public_ip("1.2.3.4")
+    fake_local_uplink.set_interfaces([LocalInterface("eth0", "192.168.1.10", "ethernet")])
+    fake_local_uplink.set_gateway("eth0", "192.168.1.1")
+
+    await reconciliation_worker.reconcile_all()
+
+    reloaded = await proxy_repo.get_by_id(proxy.id)
+    assert reloaded.route_table_id is not None
+    assert reloaded.route_table_id != dongle.route_table_id
+    rules = await fake_routing.list_rules()
+    assert any(
+        r.table_id == reloaded.route_table_id and r.fwmark == reloaded.fwmark for r in rules
+    )
+    routes = await fake_routing.list_routes(reloaded.route_table_id)
+    assert [(r.dest, r.via, r.dev) for r in routes] == [("default", "192.168.1.1", "eth0")]
+
+
 async def test_reconcile_proxies_removes_orphan(
     reconciliation_worker, enrollment_service, proxy_repo, dongle_repo
 ):

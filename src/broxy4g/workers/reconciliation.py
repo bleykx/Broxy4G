@@ -16,6 +16,7 @@ from broxy4g.services.local_connections import LocalConnectionsService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot
 from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
+from broxy4g.services.routing_slot_migration import RoutingSlotMigration
 from broxy4g.services.uplink_routes import UplinkRouteService
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class ReconciliationWorker:
         docker_compose: DockerComposeAdapter,
         metrics_snapshot: MetricsSnapshot,
         uplink_routes: UplinkRouteService,
+        slot_migration: RoutingSlotMigration,
         isolation: NetworkIsolationService | None = None,
         reset_lock: ResetLock | None = None,
         local_connections: LocalConnectionsService | None = None,
@@ -52,12 +54,14 @@ class ReconciliationWorker:
         self.docker_compose = docker_compose
         self.metrics_snapshot = metrics_snapshot
         self.uplink_routes = uplink_routes
+        self.slot_migration = slot_migration
         self.isolation = isolation
         self.reset_lock = reset_lock
         self.local_connections = local_connections
 
     async def reconcile_all(self) -> None:
         """Reconcilie tous les dongles puis tous les proxies enregistrés."""
+        await self._repair_slot_duplicates()
         dongles = await self.dongle_repo.list_all()
         for dongle in dongles:
             try:
@@ -66,6 +70,16 @@ class ReconciliationWorker:
                 logger.exception("Reconciliation échouée pour dongle %s", dongle.id)
         await self.reconcile_proxies()
         await self._reapply_isolation()
+
+    async def _repair_slot_duplicates(self) -> None:
+        """Répare les doublons de slots persistés avant toute restauration.
+
+        Un échec de la migration ne doit pas empêcher le reste du cycle.
+        """
+        try:
+            await self.slot_migration.repair_duplicates()
+        except Exception:
+            logger.exception("Échec réparation doublons de slots de routage")
 
     async def _reapply_isolation(self) -> None:
         """Réaligne la table nftables d'isolation sur l'état persisté."""

@@ -24,6 +24,7 @@ from broxy4g.services.proxy_ports import PortAllocator
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.reset import ResetService
 from broxy4g.services.routing_allocator import RoutingAllocator
+from broxy4g.services.routing_slot_migration import RoutingSlotMigration
 from broxy4g.services.uplink_routes import UplinkRouteService
 
 
@@ -112,6 +113,11 @@ def routing_allocator(dongle_repo, proxy_repo):
 @pytest.fixture
 def uplink_routes(fake_modem, fake_routing):
     return UplinkRouteService(fake_modem, fake_routing)
+
+
+@pytest.fixture
+def slot_migration(dongle_repo, proxy_repo):
+    return RoutingSlotMigration(dongle_repo, proxy_repo)
 
 
 @pytest.fixture
