@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+# Décalage de priorité pour la règle "from <ip>" (trafic propre au dongle).
+SOURCE_RULE_PRIORITY_OFFSET = 1000
+
 
 @runtime_checkable
 class RoutingAdapter(Protocol):
@@ -34,6 +37,8 @@ class RoutingRule:
     table_id: int
     fwmark: int
     priority: int
+    # Adresse source si la règle est une règle "from <ip>" (sinon None).
+    source: str | None = None
 
 
 @dataclass
@@ -76,7 +81,12 @@ class FakeRouting:
         self.remove_route_sync(table_id, dest)
 
     async def list_rules(self) -> list[RoutingRule]:
-        return self._rules.copy()
+        rules = self._rules.copy()
+        for table_id, address in self._source_rules.items():
+            rules.append(
+                RoutingRule(table_id, 0, table_id + SOURCE_RULE_PRIORITY_OFFSET, source=address)
+            )
+        return rules
 
     async def list_routes(self, table_id: int) -> list[RoutingRoute]:
         return [r for r in self._routes if r.table_id == table_id]

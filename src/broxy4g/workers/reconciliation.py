@@ -16,6 +16,7 @@ from broxy4g.services.local_connections import LocalConnectionsService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot
 from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
+from broxy4g.services.uplink_routes import UplinkRouteService
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class ReconciliationWorker:
         provisioning: ProxyProvisioningService,
         docker_compose: DockerComposeAdapter,
         metrics_snapshot: MetricsSnapshot,
+        uplink_routes: UplinkRouteService,
         isolation: NetworkIsolationService | None = None,
         reset_lock: ResetLock | None = None,
         local_connections: LocalConnectionsService | None = None,
@@ -49,6 +51,7 @@ class ReconciliationWorker:
         self.provisioning = provisioning
         self.docker_compose = docker_compose
         self.metrics_snapshot = metrics_snapshot
+        self.uplink_routes = uplink_routes
         self.isolation = isolation
         self.reset_lock = reset_lock
         self.local_connections = local_connections
@@ -131,6 +134,9 @@ class ReconciliationWorker:
                 dongle = refreshed
 
         await self._restore_proxy(dongle)
+        # (Re)pose des routes d'uplink SANS reconnexion : sur un dongle déjà
+        # actif (connect() sauté), une route écrasée est détectée et réparée ici.
+        await self._repair_uplink_routes(dongle)
         await self._verify_connectivity(dongle)
 
     async def _restore_connection(self, dongle) -> None:
@@ -173,6 +179,16 @@ class ReconciliationWorker:
             except Exception:
                 logger.exception("Échec restauration épingle locale %s", proxy.interface_name)
         await self._reconcile_proxy(proxy)
+
+    async def _repair_uplink_routes(self, dongle) -> None:
+        """(Re)pose les routes d'uplink du dongle sans reconnexion du modem.
+
+        Un échec de cette étape ne doit pas faire échouer tout le cycle.
+        """
+        try:
+            await self.uplink_routes.apply_for_dongle(dongle)
+        except Exception:
+            logger.exception("Échec réparation routes uplink dongle %s", dongle.id)
 
     async def _verify_connectivity(self, dongle) -> None:
         """Vérifie la connectivité et met à jour l'état."""

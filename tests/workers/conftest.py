@@ -24,6 +24,7 @@ from broxy4g.services.proxy_ports import PortAllocator
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.reset import ResetService
 from broxy4g.services.routing_allocator import RoutingAllocator
+from broxy4g.services.uplink_routes import UplinkRouteService
 
 
 @pytest.fixture
@@ -109,9 +110,14 @@ def routing_allocator(dongle_repo, proxy_repo):
 
 
 @pytest.fixture
+def uplink_routes(fake_modem, fake_routing):
+    return UplinkRouteService(fake_modem, fake_routing)
+
+
+@pytest.fixture
 def connection_service(
     dongle_repo, fake_modem, fake_iface, fake_routing, fake_nft, fake_connectivity,
-    routing_allocator, isolation,
+    routing_allocator, uplink_routes, isolation,
 ):
     return ConnectionService(
         dongle_repo,
@@ -121,6 +127,7 @@ def connection_service(
         fake_nft,
         fake_connectivity,
         routing_allocator,
+        uplink_routes,
         isolation=isolation,
     )
 
@@ -192,7 +199,7 @@ def discovery_worker(fake_modem, dongle_repo):
 def reconciliation_worker(
     dongle_repo, proxy_repo, fake_modem, fake_routing, fake_nft,
     fake_connectivity, connection_service, provisioning, fake_docker_compose, metrics_snapshot,
-    isolation, fake_reset_lock, local_connections,
+    uplink_routes, isolation, fake_reset_lock, local_connections,
 ):
     from broxy4g.workers.reconciliation import ReconciliationWorker
     return ReconciliationWorker(
@@ -206,6 +213,7 @@ def reconciliation_worker(
         provisioning=provisioning,
         docker_compose=fake_docker_compose,
         metrics_snapshot=metrics_snapshot,
+        uplink_routes=uplink_routes,
         isolation=isolation,
         reset_lock=fake_reset_lock,
         local_connections=local_connections,

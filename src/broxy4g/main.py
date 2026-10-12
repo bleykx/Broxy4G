@@ -21,6 +21,7 @@ from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.database import create_engine, create_session_factory, init_db
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
+from broxy4g.services.uplink_routes import UplinkRouteService
 from broxy4g.workers.discovery import DiscoveryWorker
 from broxy4g.workers.reconciliation import ReconciliationWorker
 
@@ -90,6 +91,7 @@ async def run_workers(app, stop_event: asyncio.Event, work_dir: str):
         provisioning=app.state.provisioning,
         docker_compose=app.state.docker_compose,
         metrics_snapshot=app.state.metrics_snapshot,
+        uplink_routes=UplinkRouteService(modem, routing),
         isolation=app.state.isolation,
         reset_lock=app.state.reset_lock,
         local_connections=app.state.local_connections_service,

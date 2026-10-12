@@ -19,9 +19,11 @@ FROM python:3.11-slim AS runtime
 # modemmanager: provides mmcli (D-Bus client for the host's ModemManager)
 # nftables/iproute2: network isolation and per-dongle routing
 # curl: healthcheck and connectivity checks
+# iputils-ping: ICMP probe of the connectivity worker (curl TCP fallback
+#               already exists in the adapter if ping is unavailable)
 # (NetworkManager is NOT installed: nmcli is not used inside the container)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    modemmanager nftables iproute2 curl ca-certificates \
+    modemmanager nftables iproute2 curl ca-certificates iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI and its plugins (docker-compose, docker-buildx)

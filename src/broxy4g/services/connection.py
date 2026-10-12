@@ -10,12 +10,12 @@ from broxy4g.adapters.nftables import NftablesAdapter
 from broxy4g.adapters.routing import RoutingAdapter
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
-from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.domain.interface_naming import NamedDongle, plan_interface_names
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.routing_allocator import RoutingAllocator
 from broxy4g.services.uplink_probe import UplinkProbe
+from broxy4g.services.uplink_routes import UplinkRouteService
 
 __all__ = ["ConnectionService", "DongleMetrics"]
 
@@ -40,6 +40,7 @@ class ConnectionService:
         nft: NftablesAdapter,
         connectivity: ConnectivityAdapter,
         allocator: RoutingAllocator,
+        uplink_routes: UplinkRouteService,
         isolation: NetworkIsolationService | None = None,
         ip_wait_attempts: int = 10,
         ip_wait_delay: float = 2.0,
@@ -53,6 +54,7 @@ class ConnectionService:
         self.nft = nft
         self.connectivity = connectivity
         self.allocator = allocator
+        self.uplink_routes = uplink_routes
         self.isolation = isolation
         self.probe = UplinkProbe(iface, connectivity)
         self._ip_wait_attempts = ip_wait_attempts
@@ -66,12 +68,7 @@ class ConnectionService:
 
     async def _resolve_modem(self, dongle: Dongle) -> ModemInfo | None:
         """Resolve the modem by identity to handle USB port changes."""
-        modems = await self.modem.list_modems()
-        for modem in modems:
-            identity = IdentityMaterial(imei=modem.imei, usb_serial=modem.usb_serial, iccid=modem.iccid)
-            if identity.matches(dongle.identity):
-                return modem
-        return None
+        return await self.uplink_routes.resolve_modem(dongle)
 
     async def connect(self, dongle_id: UUID) -> Dongle:
         dongle = await self._load(dongle_id)
@@ -108,13 +105,9 @@ class ConnectionService:
             await self.iface.flush_ipv4(iface_name)
             if bearer and bearer.address:
                 await self.iface.assign_address(iface_name, bearer.address, bearer.prefix)
-            if dongle.route_table_id and dongle.fwmark:
-                await self.routing.add_rule(dongle.route_table_id, dongle.fwmark)
-                if bearer and bearer.gateway:
-                    await self.routing.add_route(
-                        dongle.route_table_id, "default", bearer.gateway, iface_name,
-                    )
-                    await self.routing.add_source_rule(bearer.address, dongle.route_table_id)
+            # (Re)pose idempotente des routes d'uplink (fwmark, default, source) :
+            # seule implémentation, partagée avec la reconciliation.
+            await self.uplink_routes.apply_bearer(dongle, bearer, iface_name)
             await self._wait_for_ip(iface_name, bearer.address if bearer else None)
         except Exception as exc:
             logger.exception(

@@ -52,3 +52,11 @@ class RealShell:
                 stdout="",
                 stderr=f"command timed out after {timeout}s: {' '.join(command)}",
             )
+        except FileNotFoundError:
+            # Binaire absent (ex. "ping" non installé) : code 127, et c'est à
+            # l'adaptateur appelant de décider du fallback (ex. sonde TCP curl).
+            return ShellResult(
+                returncode=127,
+                stdout="",
+                stderr=f"command not found: {command[0]}",
+            )

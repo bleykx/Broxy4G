@@ -63,6 +63,13 @@ idempotente) ; sinon une adresse périmée resterait la 1re source et échappera
 Les probes (`ping`, `get_public_ip`) sont épinglés sur l'IP source du bearer
 (`curl --interface <IP>`, `ping -I <IP>`), jamais sur le nom d'interface.
 La table `main` et la route par défaut de l'hôte ne sont JAMAIS modifiées.
+La route par défaut de la table dédiée est `default via <gw bearer> dev <iface>` ;
+si le bearer n'expose **aucune passerelle**, on pose `default dev <iface>`
+(scope link, sans via) avec un WARNING explicite — sinon le dongle n'aurait
+aucune route par défaut du tout. La reconciliation compare la route posée au
+bearer courant (`ip route show table <id>`) et répare toute dérive (ex. une
+route `default via <gw LAN> dev eth0` écrasée dans la table du dongle) sans
+reconnexion.
 
 ## nftables Isolation
 

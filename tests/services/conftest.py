@@ -24,6 +24,7 @@ from broxy4g.services.proxy_ports import PortAllocator
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.reset import ResetService
 from broxy4g.services.routing_allocator import RoutingAllocator
+from broxy4g.services.uplink_routes import UplinkRouteService
 
 
 @pytest.fixture
@@ -109,9 +110,14 @@ def routing_allocator(dongle_repo, proxy_repo):
 
 
 @pytest.fixture
+def uplink_routes(fake_modem, fake_routing):
+    return UplinkRouteService(fake_modem, fake_routing)
+
+
+@pytest.fixture
 def connection_service(
     dongle_repo, fake_modem, fake_iface, fake_routing, fake_nft, fake_connectivity,
-    routing_allocator, isolation,
+    routing_allocator, uplink_routes, isolation,
 ):
     return ConnectionService(
         dongle_repo,
@@ -121,6 +127,7 @@ def connection_service(
         fake_nft,
         fake_connectivity,
         routing_allocator,
+        uplink_routes,
         isolation=isolation,
         modem_wait_attempts=3,
         modem_wait_delay=0.0,

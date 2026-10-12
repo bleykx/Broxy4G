@@ -1,8 +1,23 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from broxy4g.adapters.routing import RoutingRoute, RoutingRule
 from broxy4g.adapters.routing_real import RealRouting
-from broxy4g.adapters.shell import ShellAdapter
+from broxy4g.adapters.shell import ShellAdapter, ShellResult
+
+
+def _routing_with_output(stdout: str, rule_output: str = "") -> RealRouting:
+    from broxy4g.adapters.shell import FakeShell
+    shell = FakeShell()
+    shell.set_response(
+        ["ip", "route", "show", "table", "10001"],
+        ShellResult(returncode=0, stdout=stdout, stderr=""),
+    )
+    shell.set_response(
+        ["ip", "rule", "show"],
+        ShellResult(returncode=0, stdout=rule_output, stderr=""),
+    )
+    return RealRouting(shell)
 
 
 class TestRealRouting(unittest.TestCase):
@@ -73,3 +88,45 @@ class TestRealRouting(unittest.TestCase):
         mock_create_subprocess_exec.assert_called_once_with(
             "ip", "route", "del", "default", "table", "10001"
         )
+
+
+async def test_list_routes_parses_default_with_gateway_and_dashed_iface():
+    """Échantillon réel : 'default via <gw> dev dongle-1336' + route non-default ignorée."""
+    stdout = (
+        "default via 10.159.56.49 dev dongle-1336 onlink\n"
+        "10.159.56.32/27 dev dongle-1336 proto kernel scope link src 10.159.56.48\n"
+    )
+    routing = _routing_with_output(stdout)
+
+    routes = await routing.list_routes(10001)
+
+    assert routes == [RoutingRoute(table_id=10001, dest="default", via="10.159.56.49",
+                                   dev="dongle-1336")]
+
+
+async def test_list_routes_parses_default_without_gateway():
+    """Échantillon réel : 'default dev wwan1 scope link' (gateway None)."""
+    routing = _routing_with_output("default dev wwan1 scope link\n")
+
+    routes = await routing.list_routes(10001)
+
+    assert routes == [RoutingRoute(table_id=10001, dest="default", via=None, dev="wwan1")]
+
+
+async def test_list_rules_parses_fwmark_and_source_rules():
+    """Parser indépendant de l'ordre des champs (fwmark hexa + règle source)."""
+    stdout = (
+        "0:\tfrom all lookup local\n"
+        "10001:\tfrom all fwmark 0x1 lookup 10001\n"
+        "11001:\tfrom 10.159.56.48 lookup 10001\n"
+        "32766:\tfrom all lookup main\n"
+        "32767:\tfrom all lookup default\n"
+    )
+    routing = _routing_with_output("", rule_output=stdout)
+
+    rules = await routing.list_rules()
+
+    assert rules == [
+        RoutingRule(table_id=10001, fwmark=1, priority=10001),
+        RoutingRule(table_id=10001, fwmark=0, priority=11001, source="10.159.56.48"),
+    ]

@@ -269,6 +269,39 @@ async def test_reconcile_dongle_not_found(reconciliation_worker):
     await reconciliation_worker.reconcile_dongle(uuid4())
 
 
+async def test_reconcile_online_repairs_wrong_route_without_reconnect(
+    reconciliation_worker, enrollment_service, fake_modem, fake_routing,
+    fake_iface, fake_connectivity,
+):
+    """ONLINE avec route écrasée : la route est réparée SANS appel à modem.connect()."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    add_modem(fake_modem)
+    fake_connectivity.set_public_ip("1.2.3.4")
+    dongle.change_state(DongleState.CONNECTING)
+    dongle.change_state(DongleState.ONLINE)
+    await reconciliation_worker.dongle_repo.save(dongle)
+    fake_iface.set_address("wwan0", BEARER.address)
+    # État product constaté : la table du dongle ne contient que la route du LAN.
+    await fake_routing.add_rule(10001, 1)
+    await fake_routing.add_route(10001, "default", "192.168.1.254", "eth0")
+
+    with patch.object(fake_modem, "connect", new=AsyncMock()) as mock_connect:
+        await reconciliation_worker.reconcile_dongle(dongle.id)
+
+    mock_connect.assert_not_awaited()
+    routes = await fake_routing.list_routes(10001)
+    assert [(r.dest, r.via, r.dev) for r in routes] == [
+        ("default", BEARER.gateway, "wwan0"),
+    ]
+    assert any(
+        r.table_id == 10001 and r.source == BEARER.address
+        for r in await fake_routing.list_rules()
+    )
+    # Le dongle reste ONLINE : pas de reconnexion, pas de changement d'état.
+    dongle = await reconciliation_worker.dongle_repo.get_by_id(dongle.id)
+    assert dongle.state == DongleState.ONLINE
+
+
 async def test_reconcile_dongle_degraded_without_public_ip(
     reconciliation_worker, enrollment_service, fake_modem, fake_iface, fake_connectivity
 ):

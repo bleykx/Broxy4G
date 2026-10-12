@@ -39,6 +39,7 @@ from broxy4g.services.proxy_ports import PortAllocator
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.reset import ResetService
 from broxy4g.services.routing_allocator import RoutingAllocator
+from broxy4g.services.uplink_routes import UplinkRouteService
 
 
 def _build_apn_source() -> ApnResolver | None:
@@ -119,6 +120,7 @@ def create_app(
     app.state.routing_allocator = RoutingAllocator(
         app.state.dongle_repo, app.state.proxy_repo
     )
+    app.state.uplink_routes_service = UplinkRouteService(app.state.modem, app.state.routing)
     app.state.connection_service = ConnectionService(
         app.state.dongle_repo,
         app.state.modem,
@@ -127,6 +129,7 @@ def create_app(
         app.state.nft,
         app.state.connectivity,
         app.state.routing_allocator,
+        uplink_routes=app.state.uplink_routes_service,
         isolation=app.state.isolation,
     )
     files = ProxyFileWriter(ProxyPaths(Path(_resolve_data_dir(data_dir))))

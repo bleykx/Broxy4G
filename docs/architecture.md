@@ -137,6 +137,16 @@ RESETTING ──(reconnect)──► CONNECTING
 > timeout/annulation. L'application de l'isolation nftables est sérialisée
 > (single-flight) pour éviter tout entrelacement de `nft -f` sous reset batch.
 
+> **Auto-réparation des routes d'uplink :** à chaque cycle, après la
+> restauration de connexion et avant la vérification de connectivité, la
+> reconciliation (re)pose les routes d'uplink du dongle
+> (`services/uplink_routes.py`, `UplinkRouteService`) à partir de son bearer
+> courant — règle fwmark, route par défaut de la table dédiée et règle
+> source. Cette (re)pose est idempotente (aucune écriture si tout est
+> conforme) et **ne reconnecte jamais le modem** : une route écrasée sur un
+> dongle déjà `ONLINE` (dont `connect()` est sauté) est détectée et réparée
+> au cycle suivant. C'est la même implémentation que `connect()`.
+
 ### ProxyState Transitions
 
 ```
