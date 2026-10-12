@@ -203,6 +203,7 @@ async def test_connect_ip_wait_timeout_error(connection_service, enrollment_serv
         connection_service.dongle_repo, fake_modem, connection_service.iface,
         connection_service.routing, connection_service.nft,
         connection_service.connectivity,
+        connection_service.allocator,
         ip_wait_attempts=1, ip_wait_delay=0.01,
     )
 
@@ -349,6 +350,7 @@ async def test_wait_for_ip_rejects_stale_address(
         connection_service.dongle_repo, fake_modem, fake_iface,
         connection_service.routing, connection_service.nft,
         connection_service.connectivity,
+        connection_service.allocator,
         ip_wait_attempts=2, ip_wait_delay=0.01,
     )
     with patch.object(fake_iface, "assign_address", new=AsyncMock()):

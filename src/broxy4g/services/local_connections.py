@@ -14,12 +14,12 @@ from uuid import UUID
 from broxy4g.adapters.local_uplink import LocalUplinkAdapter
 from broxy4g.adapters.routing import RoutingAdapter
 from broxy4g.domain.proxy import Proxy, ProxySource
-from broxy4g.domain.routing_slots import allocate_routing_slot
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
 from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
 from broxy4g.services.proxy_provisioning import ProvisionedProxy
+from broxy4g.services.routing_allocator import RoutingAllocator
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,7 @@ class LocalConnectionsService:
         proxy_service: ProxyLifecycleService,
         routing: RoutingAdapter,
         dongle_repo: DongleRepository,
+        allocator: RoutingAllocator,
         isolation: NetworkIsolationService,
     ):
         self.uplink = uplink
@@ -48,6 +49,7 @@ class LocalConnectionsService:
         self.proxy_service = proxy_service
         self.routing = routing
         self.dongle_repo = dongle_repo
+        self.allocator = allocator
         self.isolation = isolation
         self._lock = asyncio.Lock()
 
@@ -110,9 +112,11 @@ class LocalConnectionsService:
         await self.isolation.apply()
 
     async def _pin(self, proxy: Proxy, gateway: str, interface_name: str) -> None:
+        # Le verrou sérialise la lecture des slots et l'écriture des règles ;
+        # l'allocation elle-même est déléguée à l'allocateur partagé.
         async with self._lock:
             if not proxy.route_table_id or not proxy.fwmark:
-                table_id, fwmark = await self._allocate_slot()
+                table_id, fwmark = await self.allocator.allocate()
                 proxy.route_table_id = table_id
                 proxy.fwmark = fwmark
                 await self.proxy_repo.save(proxy)
@@ -120,9 +124,3 @@ class LocalConnectionsService:
             await self.routing.add_route(
                 proxy.route_table_id, "default", gateway, interface_name
             )
-
-    async def _allocate_slot(self) -> tuple[int, int]:
-        dongles = await self.dongle_repo.list_all()
-        proxies = await self.proxy_repo.list_all()
-        used = [d.route_table_id for d in dongles] + [p.route_table_id for p in proxies]
-        return allocate_routing_slot(used)

@@ -23,6 +23,7 @@ from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
 from broxy4g.services.proxy_ports import PortAllocator
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.reset import ResetService
+from broxy4g.services.routing_allocator import RoutingAllocator
 
 
 @pytest.fixture
@@ -103,8 +104,14 @@ def isolation(proxy_repo, dongle_repo, fake_nft):
 
 
 @pytest.fixture
+def routing_allocator(dongle_repo, proxy_repo):
+    return RoutingAllocator(dongle_repo, proxy_repo)
+
+
+@pytest.fixture
 def connection_service(
-    dongle_repo, fake_modem, fake_iface, fake_routing, fake_nft, fake_connectivity, isolation
+    dongle_repo, fake_modem, fake_iface, fake_routing, fake_nft, fake_connectivity,
+    routing_allocator, isolation,
 ):
     return ConnectionService(
         dongle_repo,
@@ -113,6 +120,7 @@ def connection_service(
         fake_routing,
         fake_nft,
         fake_connectivity,
+        routing_allocator,
         isolation=isolation,
     )
 
@@ -160,7 +168,8 @@ def reset_service(dongle_repo, proxy_repo, connection_service, proxy_service, fa
 
 @pytest.fixture
 def local_connections(
-    fake_local_uplink, proxy_repo, proxy_service, fake_routing, dongle_repo, isolation
+    fake_local_uplink, proxy_repo, proxy_service, fake_routing, dongle_repo,
+    routing_allocator, isolation,
 ):
     return LocalConnectionsService(
         fake_local_uplink,
@@ -168,6 +177,7 @@ def local_connections(
         proxy_service,
         fake_routing,
         dongle_repo,
+        routing_allocator,
         isolation,
     )
 

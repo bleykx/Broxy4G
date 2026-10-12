@@ -115,7 +115,7 @@ async def test_slot_allocation_avoids_dongle_tables(local_connections, dongle_re
     dongle.route_table_id = 10001
     await dongle_repo.save(dongle)
 
-    table_id, fwmark = await local_connections._allocate_slot()
+    table_id, fwmark = await local_connections.allocator.allocate()
 
     assert table_id == 10002
     assert fwmark == table_id - 10000

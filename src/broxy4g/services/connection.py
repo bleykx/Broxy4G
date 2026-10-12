@@ -12,12 +12,12 @@ from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.domain.interface_naming import NamedDongle, plan_interface_names
-from broxy4g.domain.routing_slots import BASE_ROUTE_TABLE_ID, allocate_routing_slot
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.services.network_isolation import NetworkIsolationService
+from broxy4g.services.routing_allocator import RoutingAllocator
 from broxy4g.services.uplink_probe import UplinkProbe
 
-__all__ = ["BASE_ROUTE_TABLE_ID", "ConnectionService", "DongleMetrics", "allocate_routing_slot"]
+__all__ = ["ConnectionService", "DongleMetrics"]
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,7 @@ class ConnectionService:
         routing: RoutingAdapter,
         nft: NftablesAdapter,
         connectivity: ConnectivityAdapter,
+        allocator: RoutingAllocator,
         isolation: NetworkIsolationService | None = None,
         ip_wait_attempts: int = 10,
         ip_wait_delay: float = 2.0,
@@ -51,13 +52,13 @@ class ConnectionService:
         self.routing = routing
         self.nft = nft
         self.connectivity = connectivity
+        self.allocator = allocator
         self.isolation = isolation
         self.probe = UplinkProbe(iface, connectivity)
         self._ip_wait_attempts = ip_wait_attempts
         self._ip_wait_delay = ip_wait_delay
         self._modem_wait_attempts = modem_wait_attempts
         self._modem_wait_delay = modem_wait_delay
-        self._routing_lock = asyncio.Lock()
 
     async def _apply_isolation(self) -> None:
         if self.isolation is not None:
@@ -256,15 +257,17 @@ class ConnectionService:
         return await self.modem.get_session_id(modem.path)
 
     async def _ensure_routing(self, dongle: Dongle) -> None:
-        """Attribue (une fois) une table de routage et une marque firewall au dongle."""
+        """Attribue (une fois) une table de routage et une marque firewall au dongle.
+
+        L'allocation est déléguée à l'allocateur partagé (dongles + proxies),
+        jamais à une vue partielle : c'est elle qui garantit l'unicité du slot.
+        """
         if dongle.route_table_id and dongle.fwmark:
             return
-        async with self._routing_lock:
-            existing = await self.dongle_repo.list_all()
-            table_id, fwmark = allocate_routing_slot(d.route_table_id for d in existing)
-            dongle.route_table_id = table_id
-            dongle.fwmark = fwmark
-            await self.dongle_repo.save(dongle)
+        table_id, fwmark = await self.allocator.allocate()
+        dongle.route_table_id = table_id
+        dongle.fwmark = fwmark
+        await self.dongle_repo.save(dongle)
 
     async def _wait_for_ip(self, interface: str, expected: str | None = None) -> str:
         """Poll iface.get_ip until the expected source IP appears or attempts run out.
