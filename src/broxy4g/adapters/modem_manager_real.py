@@ -21,6 +21,7 @@ from .modem_bearer import (
 )
 from .modem_manager import BearerIpConfig, ModemInfo, SignalQuality
 from .shell_real import ShellAdapter
+from .usb_sysfs_path import USB_DEVICES_ROOT, resolve_usb_device_id
 
 logger = logging.getLogger(__name__)
 
@@ -187,10 +188,10 @@ class RealModemManager:
     @staticmethod
     def _read_usb_serial_from_sysfs(device_path: str | None) -> str | None:
         """Read /sys/bus/usb/devices/<dev>/serial (or return None)."""
-        m = re.search(r"usb\d+/([\d-]+)", device_path or "")
-        if not m:
+        dev_id = resolve_usb_device_id(device_path)
+        if dev_id is None:
             return None
-        serial_file = f"/sys/bus/usb/devices/{m.group(1)}/serial"
+        serial_file = os.path.join(USB_DEVICES_ROOT, dev_id, "serial")
         try:
             with open(serial_file) as f:
                 return f.read().strip()

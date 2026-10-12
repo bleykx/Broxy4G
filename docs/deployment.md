@@ -234,8 +234,10 @@ right defaults baked into the image.)
 The reconciliation's **soft recovery** (bounded USB re-enumeration of a
 dongle stuck in `ERROR`/`OFFLINE` with a PPP bearer, see
 `docs/architecture.md`) writes `0` then `1` into
-`/sys/bus/usb/devices/<id>/authorized` (a `root:root` `0644` file), so the
-process needs write access to that sysfs subtree.
+`/sys/bus/usb/devices/<id>/authorized` (a `root:root` `0644` file), where
+`<id>` is the **deepest** USB device id in the modem's sysfs path (the
+dongle, never a parent hub — see `docs/architecture.md`), so the process
+needs write access to that sysfs subtree.
 
 - **Docker (default deployment): no compose change is required.** The
   service already runs `privileged: true`, which makes `/sys` mounted

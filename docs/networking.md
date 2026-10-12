@@ -61,7 +61,10 @@ fichier sysfs `authorized` du **périphérique USB** du dongle, ce qui force
 le noyau à le ré-énumérer proprement (le port `net` peut alors réapparaître
 chez ModemManager au cycle suivant). Le chemin USB provient du champ
 `device` rapporté par ModemManager : il est résolvable **même sans netdev**
-(c'est précisément le cas PPP). Politique : uniquement `ERROR`/`OFFLINE`,
+(c'est précisément le cas PPP). L'identifiant de device visé est le
+composant **le plus profond** du chemin (les dongles réels sont souvent
+imbriqués derrière des hubs, ex. `…/usb1/1-1/1-1.2/1-1.2.4`) : un hub est
+**jamais** ciblé. Politique : uniquement `ERROR`/`OFFLINE`,
 jamais pendant un reset (verrou tenu), au plus une tentative par dongle et
 par cycle, attente bornée (~10 s) de la ré-apparition du modem, no-op
 journalisé si le chemin est introuvable. Détails et bornes de sécurité dans

@@ -179,13 +179,28 @@ Règles métier :
 
 Le chemin du périphérique USB est celui **rapporté par ModemManager**
 (champ `device` de `mmcli -m`, section System), porté par
-`ModemInfo.device_path` : il existe même sans netdev (cas PPP). Toute
-écriture sysfs passe par l'adaptateur testable
+`ModemInfo.device_path` : il existe même sans netdev (cas PPP).
+
+**Résolution de l'identifiant de device** (`adapters/usb_sysfs_path.py`,
+source unique, partagée avec la lecture du serial USB) : c'est le composant
+**le plus profond** du chemin qui est un identifiant sysfs USB
+(`^\d+-[\d.]+$`), suffixe d'interface `:N.M` ignoré. Les topologies réelles
+sont souvent **imbriquées** (Raspberry Pi : le dongle derrière des hubs,
+`…/usb1/1-1/1-1.2/1-1.2.4`) — l'identifiant visé est toujours le dongle,
+**jamais un hub parent**, et il n'y a jamais de repli vers un composant
+parent.
+
+Toute écriture sysfs passe par l'adaptateur testable
 `adapters/usb_device.py` (`UsbDeviceAdapter`, `RealUsbDevice`) : la cible est
-bornée (realpath du répertoire device devant se résoudre dans le vrai
-sous-arbre `…/usbN/<id>` contenant bien le fichier `authorized`). La
-politique (éligibilité, compteur par cycle, attente bornée) vit dans le
-service ; le worker `workers/reconciliation.py` ne fait que l'orchestrer.
+bornée — realpath du répertoire device devant (a) avoir pour dernier
+composant l'ID visé et être situé dans l'arborescence d'un contrôleur
+(`…/usbN/…`), (b) contenir bien le fichier `authorized`, et (c) **ne pas
+être un hub** (`bDeviceClass` = `09`, refusé avec un WARNING — le
+désautorisé ferait tomber tous les périphériques en aval). Si
+`bDeviceClass` est illisible, le contrôle hub est sauté (DEBUG) et la borne
+de chemin décide seule. La politique (éligibilité, compteur par cycle,
+attente bornée) vit dans le service ; le worker `workers/reconciliation.py`
+ne fait que l'orchestrer.
 
 ### ProxyState Transitions
 

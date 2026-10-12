@@ -646,3 +646,40 @@ class TestGetIccid:
         m = RealModemManager(fake_shell)
         iccid = await m.get_iccid("/org/freedesktop/ModemManager1/Modem/0")
         assert iccid == "8933150224041411388"
+
+
+class TestReadUsbSerialFromSysfs:
+    """Le serial lu est celui du **dongle** (composant le plus profond),
+    jamais celui du hub parent (topologie imbriquée du Raspberry Pi)."""
+
+    PI_DONGLE = "/sys/devices/platform/soc/3f980000.usb/usb1/1-1/1-1.2/1-1.2.4"
+
+    def _build(self, tmp_path):
+        """``root/<id>`` → symlink ; hub ``1-1`` avec son propre serial."""
+        root = tmp_path / "bus" / "usb" / "devices"
+        usb1 = tmp_path / "usb1"
+        hub1 = usb1 / "1-1"
+        dongle = hub1 / "1-1.2" / "1-1.2.4"
+        dongle.mkdir(parents=True)
+        root.mkdir(parents=True)
+        (hub1 / "serial").write_text("HUB_SERIAL\n")
+        (dongle / "serial").write_text("DONGLE_SERIAL\n")
+        (root / "1-1").symlink_to(hub1)
+        (root / "1-1.2.4").symlink_to(dongle)
+        return root
+
+    def test_nested_topology_reads_dongle_serial(self, tmp_path, monkeypatch):
+        root = self._build(tmp_path)
+        monkeypatch.setattr(
+            "broxy4g.adapters.modem_manager_real.USB_DEVICES_ROOT", str(root)
+        )
+
+        serial = RealModemManager._read_usb_serial_from_sysfs(self.PI_DONGLE)
+
+        assert serial == "DONGLE_SERIAL"
+
+    def test_unresolvable_path_returns_none_without_fs_access(self):
+        assert RealModemManager._read_usb_serial_from_sysfs(None) is None
+        assert RealModemManager._read_usb_serial_from_sysfs(
+            "/sys/devices/platform/soc"
+        ) is None

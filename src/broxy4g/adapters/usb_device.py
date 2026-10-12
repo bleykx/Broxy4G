@@ -8,24 +8,29 @@ ModemManager, donc aucun netdev).
 
 Le chemin du périphérique USB est rapporté par ModemManager (champ ``device``
 de ``mmcli -m``, section System) : il existe même quand aucun netdev n'est
-présent. Seule écriture possible : ``<root>/<usb-id>/authorized``, dont le
-répertoire se résout (realpath) dans un vrai répertoire de device USB
-(``…/usbN/<usb-id>``) — toute autre cible est refusée.
+présent. Les topologies réelles sont souvent imbriquées (le dongle derrière
+des hubs, ex. Pi : ``…/usb1/1-1/1-1.2/1-1.2.4``) : l'identifiant visé est
+toujours le composant **le plus profond** (``adapters/usb_sysfs_path.py``),
+et un hub USB (``bDeviceClass`` = ``09``) est **jamais** ciblé — le
+désautorisé ferait tomber tous les périphériques en aval.
+
+Seule écriture possible : ``<root>/<usb-id>/authorized``, dont le
+répertoire se résout (realpath) dans l'arborescence d'un contrôleur USB
+(``…/usbN/…``) avec pour dernier composant l'ID visé — toute autre cible
+est refusée.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections.abc import Callable
 from typing import Protocol, runtime_checkable
 
-# Fragment d'identifiant de device USB dans un chemin sysfs :
-# usb1/1-7 → "1-7", usb1/1-1.2.4 → "1-1.2.4" (chiffres, tirets ET points :
-# les dongles multifonction sont des sous-périphériques multi-niveaux).
-_USB_DEV_RE = re.compile(r"usb\d+/([\d.-]+)")
+from .usb_sysfs_path import USB_DEVICES_ROOT, resolve_usb_device_id
 
-USB_DEVICES_ROOT = "/sys/bus/usb/devices"
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -42,31 +47,66 @@ class UsbDeviceAdapter(Protocol):
 
 
 class RealUsbDevice:
-    """Lecture/écriture ``authorized`` dans sysfs, avec borne de chemin.
+    """Lecture/écriture ``authorized`` dans sysfs, avec bornes de chemin.
 
-    La borne : le device est extrait du chemin par la regex ``usbN/ID``
-    (l'ID est limité à chiffres/points/tirets, donc impossible d'infiltrer
-    ``..`` ou ``/``), puis le
-    répertoire ``<root>/<ID>`` doit exister ET se résoudre (realpath) dans un
-    vrai sous-arbre USB (``…/usbN/<ID>``) contenant bien le fichier
-    ``authorized``.
+    Résolution en trois bornes défensives :
+
+    1. l'identifiant est le composant **le plus profond** du chemin rapporté
+       (topologies imbriquées derrière des hubs : le dongle, jamais le hub) ;
+    2. le répertoire ``<root>/<ID>`` doit se résoudre (realpath) dans
+       l'arborescence d'un contrôleur USB (``…/usbN/…``, dernier composant =
+       l'ID visé, imbriquement compris) et contenir le fichier ``authorized`` ;
+    3. le device ne doit pas être un **hub** (``bDeviceClass`` = ``09``) :
+       le désautorisé couperait tous les périphériques en aval.
     """
 
     def __init__(self, root: str = USB_DEVICES_ROOT):
         self._root = root
 
     async def resolve_authorized_file(self, device_path: str | None) -> str | None:
-        if not device_path:
+        dev_id = resolve_usb_device_id(device_path)
+        if dev_id is None:
             return None
-        m = _USB_DEV_RE.search(device_path)
-        if not m:
-            return None
-        dev_id = m.group(1)
         device_dir = os.path.realpath(os.path.join(self._root, dev_id))
-        if not re.fullmatch(rf".*usb\d+/{re.escape(dev_id)}", device_dir):
+        # Borne 2 : le realpath est un vrai device USB — dernier composant =
+        # l'ID visé, dans l'arborescence d'un contrôleur (``…/usbN/…``),
+        # y compris imbriquée (``…/usb1/1-1/1-1.2/1-1.2.4``).
+        if os.path.basename(device_dir) != dev_id or not re.search(
+            r"/usb\d+/", device_dir
+        ):
             return None
         authorized_file = os.path.join(device_dir, "authorized")
-        return authorized_file if os.path.isfile(authorized_file) else None
+        if not os.path.isfile(authorized_file):
+            return None
+        if await self._is_usb_hub(device_dir):
+            logger.warning(
+                "Refus de cibler le périphérique USB %s : c'est un hub "
+                "(bDeviceClass=09) — le désautorisé ferait tomber tous les "
+                "périphériques en aval (dongle inclus)",
+                dev_id,
+            )
+            return None
+        return authorized_file
+
+    async def _is_usb_hub(self, device_dir: str) -> bool:
+        """True si ``device_dir`` est un hub USB (``bDeviceClass`` = ``09``).
+
+        Fichier illisible (absent ou permissions) : on **ne refuse pas** —
+        tout device USB du bus expose ce fichier, la borne realpath (2) reste
+        active, et refuser ici rendrait la récupération inopérante sur tout
+        sysfs atypique. L'anomalie est journalisée en DEBUG et la décision
+        finale revient à la borne de chemin.
+        """
+        try:
+            with open(os.path.join(device_dir, "bDeviceClass")) as f:
+                return f.read().strip() == "09"
+        except OSError:
+            logger.debug(
+                "bDeviceClass illisible pour %s — contrôle hub sauté "
+                "(la borne realpath reste active)",
+                device_dir,
+            )
+            return False
 
     async def read_authorized(self, authorized_file: str) -> bool:
         with open(authorized_file) as f:
@@ -93,11 +133,11 @@ class FakeUsbDevice:
         self.on_reenumeration: Callable[[], None] | None = None
 
     def register(self, device_path: str | None, authorized: bool = True) -> str | None:
-        m = _USB_DEV_RE.search(device_path or "")
-        if not m:
+        dev_id = resolve_usb_device_id(device_path)
+        if dev_id is None:
             return None
-        path = f"{USB_DEVICES_ROOT}/{m.group(1)}/authorized"
-        self._files[m.group(1)] = path
+        path = f"{USB_DEVICES_ROOT}/{dev_id}/authorized"
+        self._files[dev_id] = path
         self._state[path] = authorized
         return path
 
@@ -105,10 +145,10 @@ class FakeUsbDevice:
         self._state[authorized_file] = value
 
     async def resolve_authorized_file(self, device_path: str | None) -> str | None:
-        m = _USB_DEV_RE.search(device_path or "")
-        if not m:
+        dev_id = resolve_usb_device_id(device_path)
+        if dev_id is None:
             return None
-        return self._files.get(m.group(1))
+        return self._files.get(dev_id)
 
     async def read_authorized(self, authorized_file: str) -> bool:
         return self._state.get(authorized_file, False)

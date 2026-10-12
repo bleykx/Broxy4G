@@ -9,13 +9,11 @@ import re
 from collections.abc import Callable
 
 from broxy4g.adapters.modem_manager import ModemInfo, SignalQuality
+from broxy4g.adapters.usb_sysfs_path import resolve_usb_device_id
 
 # ---------------------------------------------------------------------------
 # Regex helpers
 # ---------------------------------------------------------------------------
-
-# USB device path fragment: usb1/1-7 → group(1) = "1-7"
-_USB_DEV_RE = re.compile(r"usb\d+/([\d-]+)")
 
 # Key-value after pipe: everything before the first ': ' is the key
 # Matches: "state: registered" and "primary sim path: /org/..."
@@ -156,14 +154,11 @@ def _extract_usb_serial(
 ) -> str | None:
     """Extract USB serial from sysfs device path.
 
-    If *device_path* is None or doesn't match ``usbN/X-Y``, return None.
-    If *read_fn* is provided (not None), call it with device_path and return
-    its result (for testing).
+    If *device_path* carries no usable USB device id (see
+    :func:`usb_sysfs_path.resolve_usb_device_id`), return None. If *read_fn*
+    is provided (not None), call it with device_path and return its result.
     """
-    if not device_path:
-        return None
-    m = _USB_DEV_RE.search(device_path)
-    if not m:
+    if resolve_usb_device_id(device_path) is None:
         return None
     if read_fn is not None:
         return read_fn(device_path)

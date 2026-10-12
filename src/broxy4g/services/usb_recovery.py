@@ -129,7 +129,8 @@ class UsbRecoveryService:
         """
         if await self._write_if_different(authorized_file, True, dongle_id):
             return True
-        logger.exception(
+        # L'exception d'écriture est déjà journalisée par _write_if_different.
+        logger.warning(
             "Ré-autorisation échouée (authorized=1) dongle %s, nouvelle tentative",
             dongle_id,
         )

@@ -1,3 +1,4 @@
+import logging
 import os
 
 from broxy4g.adapters.usb_device import USB_DEVICES_ROOT, FakeUsbDevice, RealUsbDevice
@@ -67,6 +68,82 @@ async def test_resolve_rejects_paths_without_usb_fragment(tmp_path):
     assert await usb.resolve_authorized_file("/sys/devices/platform/foo") is None
     assert await usb.resolve_authorized_file(None) is None
     assert await usb.resolve_authorized_file("") is None
+
+
+# ---------------------------------------------------------------------------
+# Topologie imbriquée (Raspberry Pi) : le dongle est derrière des hubs.
+#   /sys/devices/platform/soc/3f980000.usb/usb1/1-1/1-1.2/1-1.2.4
+# Cibler le hub `1-1` au lieu du dongle le ferait tomber avec tout ce qui
+# est en aval — la résolution doit toujours viser le composant le plus profond.
+# ---------------------------------------------------------------------------
+
+PI_DONGLE = "/sys/devices/platform/soc/3f980000.usb/usb1/1-1/1-1.2/1-1.2.4"
+
+
+def _build_nested_sysfs(tmp_path):
+    """Façade sysfs imbriquée : hub 1-1 → hub 1-1.2 → dongle 1-1.2.4."""
+    root = tmp_path / "bus" / "usb" / "devices"
+    usb1 = tmp_path / "devices" / "platform" / "soc" / "3f980000.usb" / "usb1"
+    root.mkdir(parents=True)
+    usb1.mkdir(parents=True)
+    hub1 = usb1 / "1-1"
+    hub2 = hub1 / "1-1.2"
+    dongle = hub2 / "1-1.2.4"
+    for device, class_code in ((hub1, "09"), (hub2, "09"), (dongle, "00")):
+        device.mkdir(parents=True)
+        (device / "authorized").write_text("1\n")
+        (device / "bDeviceClass").write_text(class_code + "\n")
+    (hub1 / "serial").write_text("HUB_SERIAL\n")
+    (dongle / "serial").write_text("DONGLE_SERIAL\n")
+    # Interface USB du dongle : pas de fichier ``authorized``.
+    (dongle / "1-1.2.4:1.0").mkdir()
+    for dev_id, target in (("1-1", hub1), ("1-1.2", hub2), ("1-1.2.4", dongle)):
+        (root / dev_id).symlink_to(target)
+    return root, dongle
+
+
+async def test_nested_topology_targets_dongle_never_hub(tmp_path):
+    """Topologie imbriquée : la résolution cible le dongle, jamais le hub parent."""
+    root, dongle = _build_nested_sysfs(tmp_path)
+    usb = RealUsbDevice(str(root))
+
+    path = await usb.resolve_authorized_file(PI_DONGLE)
+
+    assert path == os.path.realpath(str(dongle / "authorized"))
+
+
+async def test_nested_interface_suffix_stripped_to_device(tmp_path):
+    """Le suffixe d'interface ``:1.0`` est ignoré : on remonte au device."""
+    root, dongle = _build_nested_sysfs(tmp_path)
+    usb = RealUsbDevice(str(root))
+
+    path = await usb.resolve_authorized_file(PI_DONGLE + "/1-1.2.4:1.0")
+
+    assert path == os.path.realpath(str(dongle / "authorized"))
+
+
+async def test_bare_device_id_resolves(tmp_path):
+    """Un identifiant nu (sans préfixe ``usbN/``) est accepté s'il existe."""
+    root, dongle = _build_nested_sysfs(tmp_path)
+    usb = RealUsbDevice(str(root))
+
+    path = await usb.resolve_authorized_file("1-1.2.4")
+
+    assert path == os.path.realpath(str(dongle / "authorized"))
+
+
+async def test_hub_only_is_rejected_with_warning(tmp_path, caplog):
+    """Seul un hub en cible ⇒ refus explicite (WARNING), pas de no-op silencieux."""
+    root, _ = _build_nested_sysfs(tmp_path)
+    usb = RealUsbDevice(str(root))
+    hub_path = PI_DONGLE.rsplit("/", 2)[0]  # …/usb1/1-1
+
+    with caplog.at_level(logging.WARNING, logger="broxy4g.adapters.usb_device"):
+        path = await usb.resolve_authorized_file(hub_path)
+
+    assert path is None
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("hub" in m.lower() for m in warnings)
 
 
 async def test_read_write_roundtrip(tmp_path):
