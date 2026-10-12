@@ -280,7 +280,8 @@ async def test_connect_flushes_stale_addresses(connection_service, enrollment_se
 async def test_connect_never_renames_interface(
     connection_service, enrollment_service, fake_modem, fake_iface
 ):
-    """L'application ne renomme jamais un netdev : aucun appel de renommage."""
+    """L'application ne renomme jamais un netdev : le nom persisté est celui
+    du netdev résolu par l'adaptateur (sysfs)."""
     identity = IdentityMaterial(imei="123456789012345")
     dongle = await enrollment_service.enroll(identity, "Test", "test.apn")
     dongle.route_table_id = 10001
@@ -290,8 +291,6 @@ async def test_connect_never_renames_interface(
     result = await connection_service.connect(dongle.id)
 
     assert result.state == DongleState.ONLINE
-    assert fake_iface.renames == []
-    # Le nom persisté est celui du netdev résolu par l'adaptateur (sysfs).
     assert result.interface_name == "wwan0"
     assert await fake_iface.get_ip("wwan0") == BEARER.address
 
@@ -311,7 +310,6 @@ async def test_connect_modem_without_interface_fails(
 
     assert result.state == DongleState.ERROR
     mock_connect.assert_not_awaited()
-    assert fake_iface.renames == []
     saved = await enrollment_service.dongle_repo.get_by_id(dongle.id)
     assert saved.state == DongleState.ERROR
     assert saved.last_error is not None
@@ -346,7 +344,6 @@ async def test_connect_ppp_bearer_fails_with_ppp_message(
     result = await service.connect(dongle.id)
 
     assert result.state == DongleState.ERROR
-    assert fake_iface.renames == []
     saved = await enrollment_service.dongle_repo.get_by_id(dongle.id)
     assert saved.state == DongleState.ERROR
     assert saved.last_error is not None

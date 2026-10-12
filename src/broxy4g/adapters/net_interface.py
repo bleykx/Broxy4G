@@ -24,9 +24,6 @@ class InterfaceAdapter(Protocol):
     async def get_ip(self, name: str) -> str | None:
         ...
 
-    async def rename(self, old: str, new: str) -> None:
-        ...
-
 
 class RealInterface:
     def __init__(self, shell):
@@ -65,22 +62,11 @@ class RealInterface:
                 return value.split("/", 1)[0]
         return None
 
-    async def rename(self, old: str, new: str) -> None:
-        """Renomme l'interface (idempotent). L'interface reste down : le flux
-        de connexion la remonte ensuite."""
-        if old == new:
-            return
-        await self._run_checked("ip link down", ["ip", "link", "set", "dev", old, "down"])
-        await self._run_checked(
-            "ip link rename", ["ip", "link", "set", "dev", old, "name", new]
-        )
-
 
 class FakeInterface:
     def __init__(self):
         self._addresses: dict[str, str] = {}
         self.up: set[str] = set()
-        self.renames: list[tuple[str, str]] = []
 
     def set_address(self, name: str, address: str | None) -> None:
         if address is None:
@@ -103,13 +89,3 @@ class FakeInterface:
 
     async def get_ip(self, name: str) -> str | None:
         return self._addresses.get(name)
-
-    async def rename(self, old: str, new: str) -> None:
-        if old == new:
-            return
-        if old in self._addresses:
-            self._addresses[new] = self._addresses.pop(old)
-        if old in self.up:
-            self.up.discard(old)
-            self.up.add(new)
-        self.renames.append((old, new))
