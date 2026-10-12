@@ -12,10 +12,14 @@ BEARER = BearerIpConfig(address="10.0.0.1", prefix=30, gateway="10.0.0.2")
 STALE = "10.95.117.182"
 
 
-def add_modem(fake_modem, path=MODEM_PATH, imei="123456789012345", interface="wwan0", bearer=BEARER):
+def add_modem(
+    fake_modem, path=MODEM_PATH, imei="123456789012345", interface="wwan0",
+    bearer=BEARER, device=None,
+):
     fake_modem.add_modem(ModemInfo(
         path=path, imei=imei, iccid=None,
         usb_serial=None, state="connected", interface_name=interface,
+        device_path=device,
     ))
     fake_modem.set_bearer_ip(path, bearer)
 
@@ -403,6 +407,114 @@ async def test_reconcile_updates_metrics_snapshot(
     assert reconciliation_worker.metrics_snapshot.get(dongle.id) == SummaryMetrics(
         public_ip="1.2.3.4", signal_quality=85
     )
+
+
+USB_DEVICE = "/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1"
+
+
+async def test_reconcile_error_triggers_usb_recovery(
+    reconciliation_worker, enrollment_service, fake_modem,
+    fake_connectivity, fake_usb_device,
+):
+    """Un dongle ERROR avec chemin USB éligible subit la ré-énumération douce."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    add_modem(fake_modem, device=USB_DEVICE)
+    fake_connectivity.set_public_ip("1.2.3.4")
+    dongle.change_state(DongleState.CONNECTING)
+    dongle.change_state(DongleState.ONLINE)
+    dongle.change_state(DongleState.ERROR)
+    await reconciliation_worker.dongle_repo.save(dongle)
+    authorized_file = fake_usb_device.register(USB_DEVICE)
+    fake_usb_device.on_reenumeration = (
+        lambda: fake_modem.simulate_usb_reevaluation(MODEM_PATH)
+    )
+
+    await reconciliation_worker.reconcile_dongle(dongle.id)
+
+    assert fake_usb_device.writes == [
+        (authorized_file, False), (authorized_file, True),
+    ]
+    dongle = await reconciliation_worker.dongle_repo.get_by_id(dongle.id)
+    assert dongle.state == DongleState.ONLINE
+
+
+async def test_reconcile_error_without_device_path_skips_usb_recovery(
+    reconciliation_worker, enrollment_service, fake_modem,
+    fake_connectivity, fake_usb_device,
+):
+    """Sans chemin USB (ni device_path ni netdev) : la politique est un no-op."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    add_modem(fake_modem, device=None)
+    fake_connectivity.set_public_ip("1.2.3.4")
+    dongle.change_state(DongleState.CONNECTING)
+    dongle.change_state(DongleState.ONLINE)
+    dongle.change_state(DongleState.ERROR)
+    await reconciliation_worker.dongle_repo.save(dongle)
+
+    await reconciliation_worker.reconcile_dongle(dongle.id)
+
+    assert fake_usb_device.writes == []
+    dongle = await reconciliation_worker.dongle_repo.get_by_id(dongle.id)
+    assert dongle.state == DongleState.ONLINE
+
+
+async def test_begin_cycle_called_at_reconcile_all_start(
+    reconciliation_worker, enrollment_service, usb_recovery
+):
+    """Le compteur de tentatives USB est remis à zéro au début de reconcile_all."""
+    await _enroll_with_routing(enrollment_service)
+
+    with patch.object(usb_recovery, "begin_cycle") as mock_begin:
+        await reconciliation_worker.reconcile_all()
+
+    mock_begin.assert_called_once()
+
+
+async def test_single_usb_attempt_across_reconcile_dongle_calls(
+    reconciliation_worker, enrollment_service, fake_modem,
+    fake_connectivity, fake_usb_device, usb_recovery,
+):
+    """Deux reconcile_dongle du même cycle ⇒ une seule tentative USB."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    add_modem(fake_modem, device=USB_DEVICE)
+    fake_connectivity.set_public_ip("1.2.3.4")
+    dongle.change_state(DongleState.CONNECTING)
+    dongle.change_state(DongleState.ONLINE)
+    dongle.change_state(DongleState.ERROR)
+    await reconciliation_worker.dongle_repo.save(dongle)
+    fake_usb_device.register(USB_DEVICE)
+    fake_usb_device.on_reenumeration = (
+        lambda: fake_modem.simulate_usb_reevaluation(MODEM_PATH)
+    )
+
+    usb_recovery.begin_cycle()
+    await reconciliation_worker.reconcile_dongle(dongle.id)
+    await reconciliation_worker.reconcile_dongle(dongle.id)
+
+    assert len(fake_usb_device.writes) == 2  # un seul toggle 0→1
+
+
+async def test_usb_recovery_failure_does_not_break_cycle(
+    reconciliation_worker, enrollment_service, fake_modem,
+    fake_connectivity, fake_usb_device, usb_recovery,
+):
+    """Une exception dans la récupération USB ne casse pas la restauration."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    add_modem(fake_modem, device=USB_DEVICE)
+    fake_connectivity.set_public_ip("1.2.3.4")
+    dongle.change_state(DongleState.CONNECTING)
+    dongle.change_state(DongleState.ONLINE)
+    dongle.change_state(DongleState.ERROR)
+    await reconciliation_worker.dongle_repo.save(dongle)
+
+    async def boom(_dongle_id):
+        raise RuntimeError("sysfs inaccessible")
+
+    with patch.object(usb_recovery, "attempt", new=AsyncMock(side_effect=boom)):
+        await reconciliation_worker.reconcile_dongle(dongle.id)
+
+    dongle = await reconciliation_worker.dongle_repo.get_by_id(dongle.id)
+    assert dongle.state == DongleState.ONLINE
 
 
 async def test_degraded_with_stale_address_recovers(

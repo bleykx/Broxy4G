@@ -7,6 +7,7 @@ from broxy4g.adapters.modem_manager import FakeModemManager
 from broxy4g.adapters.net_interface import FakeInterface
 from broxy4g.adapters.nftables import FakeNftables
 from broxy4g.adapters.routing import FakeRouting
+from broxy4g.adapters.usb_device import FakeUsbDevice
 from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.allowed_host_repository import AllowedHostRepository
 from broxy4g.repositories.database import create_engine, create_session_factory, init_db
@@ -26,6 +27,7 @@ from broxy4g.services.reset import ResetService
 from broxy4g.services.routing_allocator import RoutingAllocator
 from broxy4g.services.routing_slot_migration import RoutingSlotMigration
 from broxy4g.services.uplink_routes import UplinkRouteService
+from broxy4g.services.usb_recovery import UsbRecoveryService
 
 
 @pytest.fixture
@@ -113,6 +115,24 @@ def routing_allocator(dongle_repo, proxy_repo):
 @pytest.fixture
 def uplink_routes(fake_modem, fake_routing):
     return UplinkRouteService(fake_modem, fake_routing)
+
+
+@pytest.fixture
+def fake_usb_device():
+    return FakeUsbDevice()
+
+
+@pytest.fixture
+def usb_recovery(dongle_repo, uplink_routes, fake_usb_device, fake_reset_lock):
+    # Timeout court : les tests n'attendent pas le délai par défaut (~10 s).
+    return UsbRecoveryService(
+        dongle_repo,
+        uplink_routes,
+        fake_usb_device,
+        fake_reset_lock,
+        reappearance_timeout=0.2,
+        poll_delay=0.02,
+    )
 
 
 @pytest.fixture

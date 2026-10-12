@@ -229,6 +229,40 @@ docker run -d --name broxy4g --privileged --network host \
 (`BROXY4G_HOST`, `BROXY4G_PORT` and `BROXY4G_FRONTEND_DIST` already have the
 right defaults baked into the image.)
 
+### Soft USB Recovery — sysfs Write Prerequisite
+
+The reconciliation's **soft recovery** (bounded USB re-enumeration of a
+dongle stuck in `ERROR`/`OFFLINE` with a PPP bearer, see
+`docs/architecture.md`) writes `0` then `1` into
+`/sys/bus/usb/devices/<id>/authorized` (a `root:root` `0644` file), so the
+process needs write access to that sysfs subtree.
+
+- **Docker (default deployment): no compose change is required.** The
+  service already runs `privileged: true`, which makes `/sys` mounted
+  read-write inside the container, and the image sets no `USER` (the process
+  runs as root): the `authorized` files are writable. This was verified when
+  soft recovery was introduced; `docker-compose.yml` was intentionally left
+  unchanged.
+- If `privileged: true` is ever removed, add the minimal read-write bind of
+  the single subtree the app writes (a plain bind is read-write by default —
+  do **not** downgrade the rest of the container to a read-only `/sys`
+  without this):
+
+  ```yaml
+  volumes:
+    - /sys/bus/usb/devices:/sys/bus/usb/devices
+  ```
+
+- **Native systemd deployment (`deploy/broxy4g.service`): soft recovery is
+  currently disabled by the sandbox.** `ProtectSystem=strict` mounts `/sys`
+  read-only and the service runs as the unprivileged user `broxy4g`, so the
+  `authorized` files are not writable. The feature degrades gracefully (the
+  toggle is skipped, the attempt is logged, the reconciliation cycle is not
+  broken), but a stuck PPP dongle still requires a full reset. Enabling it
+  under systemd would require running the service as root (or an ACL on the
+  sysfs files) plus `ReadWritePaths=/sys/bus/usb/devices` — deliberately not
+  applied to the unit file.
+
 ### ARM64 / Raspberry Pi
 
 - Raspberry Pi OS **64 bits** is required (arm64/aarch64); 32-bit systems

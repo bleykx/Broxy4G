@@ -65,6 +65,10 @@ class ModemInfo:
     imsi: str | None = None
     operator_id: str | None = None
     operator_name: str | None = None
+    # Chemin sysfs du périphérique USB (champ ``device`` de ``mmcli -m``).
+    # Existe même sans port net (bearer PPP) : c'est la clé de la
+    # ré-énumération USB douce. Jamais de clé d'identité — confort/ressource.
+    device_path: str | None = None
 
 
 @dataclass
@@ -100,6 +104,15 @@ class FakeModemManager:
         """Test helper : le modem ne réapparaît plus après un reset."""
         self._hide_on_reset[path] = True
 
+    def simulate_usb_reevaluation(self, path: str) -> None:
+        """Test helper : ré-énumération USB (disparaît 1 poll, puis réapparaît)."""
+        self._vanish_remaining[path] = 1
+
+    def forget(self, path: str) -> None:
+        """Test helper : le modem disparaît définitivement de ModemManager."""
+        self._modems.pop(path, None)
+        self._vanish_remaining.pop(path, None)
+
     def set_signal(self, path: str, quality: SignalQuality):
         self._signal[path] = quality
 
@@ -134,6 +147,7 @@ class FakeModemManager:
                 imsi=modem.imsi,
                 operator_id=modem.operator_id,
                 operator_name=modem.operator_name,
+                device_path=modem.device_path,
             )
             self._modems[modem_path] = modem
         return modem

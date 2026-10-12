@@ -50,6 +50,23 @@ fragile au reboot suivant.
   pour que NetworkManager ne se soit jamais empare de l'interface du dongle
   (cf. `docs/deployment.md`).
 
+### Récupération douce des bearers PPP (ré-énumération USB)
+
+Un dongle dont le bearer est dégradé en **PPP** (port `net` absent chez
+ModemManager, donc aucun netdev, aucun IPv4) ne peut pas se rétablir par
+reconnexion : `connect()` échoue à chaque cycle et le dongle reste `ERROR`.
+La reconciliation tente alors une récupération douce —
+`UsbRecoveryService` (`services/usb_recovery.py`) : écriture `0` puis `1` du
+fichier sysfs `authorized` du **périphérique USB** du dongle, ce qui force
+le noyau à le ré-énumérer proprement (le port `net` peut alors réapparaître
+chez ModemManager au cycle suivant). Le chemin USB provient du champ
+`device` rapporté par ModemManager : il est résolvable **même sans netdev**
+(c'est précisément le cas PPP). Politique : uniquement `ERROR`/`OFFLINE`,
+jamais pendant un reset (verrou tenu), au plus une tentative par dongle et
+par cycle, attente bornée (~10 s) de la ré-apparition du modem, no-op
+journalisé si le chemin est introuvable. Détails et bornes de sécurité dans
+`docs/architecture.md` ; prérequis d'écriture sysfs dans `docs/deployment.md`.
+
 ## Interface Address and Probes
 
 Seule une IPv4 active par interface dongle. Avant toute assignation du bearer,

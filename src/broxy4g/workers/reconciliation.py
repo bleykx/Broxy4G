@@ -18,6 +18,7 @@ from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.routing_slot_migration import RoutingSlotMigration
 from broxy4g.services.uplink_routes import UplinkRouteService
+from broxy4g.services.usb_recovery import UsbRecoveryService
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class ReconciliationWorker:
         isolation: NetworkIsolationService | None = None,
         reset_lock: ResetLock | None = None,
         local_connections: LocalConnectionsService | None = None,
+        usb_recovery: UsbRecoveryService | None = None,
     ):
         self.dongle_repo = dongle_repo
         self.proxy_repo = proxy_repo
@@ -58,9 +60,12 @@ class ReconciliationWorker:
         self.isolation = isolation
         self.reset_lock = reset_lock
         self.local_connections = local_connections
+        self.usb_recovery = usb_recovery
 
     async def reconcile_all(self) -> None:
         """Reconcilie tous les dongles puis tous les proxies enregistrés."""
+        if self.usb_recovery is not None:
+            self.usb_recovery.begin_cycle()
         await self._repair_slot_duplicates()
         dongles = await self.dongle_repo.list_all()
         for dongle in dongles:
@@ -135,6 +140,11 @@ class ReconciliationWorker:
             )
             return
 
+        # Récupération douce : un dongle bloqué (ERROR/OFFLINE) avec un
+        # bearer PPP (aucun netdev) ne peut pas se rétablir en reconnectant ;
+        # on tente une ré-énumération USB bornée avant la restauration.
+        await self._attempt_usb_recovery(dongle)
+
         # Ne PAS reconnecter si le dongle est déjà actif.
         skip_connect = dongle.state in (DongleState.ONLINE, DongleState.CONNECTING)
 
@@ -152,6 +162,15 @@ class ReconciliationWorker:
         # actif (connect() sauté), une route écrasée est détectée et réparée ici.
         await self._repair_uplink_routes(dongle)
         await self._verify_connectivity(dongle)
+
+    async def _attempt_usb_recovery(self, dongle) -> None:
+        """Délègue la récupération USB douce ; un échec ne casse pas le cycle."""
+        if self.usb_recovery is None:
+            return
+        try:
+            await self.usb_recovery.attempt(dongle.id)
+        except Exception:
+            logger.exception("Échec récupération USB douce dongle %s", dongle.id)
 
     async def _restore_connection(self, dongle) -> None:
         """Rétablit la connexion mobile et les routes."""

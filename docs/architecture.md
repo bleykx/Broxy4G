@@ -147,6 +147,46 @@ RESETTING ──(reconnect)──► CONNECTING
 > dongle déjà `ONLINE` (dont `connect()` est sauté) est détectée et réparée
 > au cycle suivant. C'est la même implémentation que `connect()`.
 
+### Récupération douce par ré-énumération USB
+
+Un dongle **enrôlé** bloqué en `ERROR` ou `OFFLINE` avec un bearer **PPP**
+(port `net` absent chez ModemManager, donc aucun netdev) ne peut pas se
+rétablir en reconnectant : `connect()` échoue à chaque cycle. La
+reconciliation tente alors, **avant** la restauration de connexion, une
+récupération douce : désautorisation puis ré-autorisation du périphérique
+USB
+du dongle (écriture `0` puis `1` du fichier sysfs `authorized`), ce qui
+force le noyau à le ré-énumérer proprement — sans reboot ni reset
+applicatif (`services/usb_recovery.py`, `UsbRecoveryService`).
+
+Règles métier :
+
+- Éligible uniquement depuis `ERROR` ou `OFFLINE` (jamais `RESETTING`,
+  `CONFIGURING`, `DISCOVERED`, `UNENROLLED`, `CONNECTING`, `ONLINE`,
+  `DEGRADED`) ; jamais si le **verrou de reset** est tenu pour le dongle.
+- **Au plus une tentative par dongle et par cycle de reconciliation** : le
+  compteur est remis à zéro par `begin_cycle()` au début de
+  `reconcile_all()` ; si le dongle reste bloqué, le cycle suivant
+  (30 s) réessaie.
+- **Attente bornée** (timeout par défaut ~10 s) de la ré-apparition du modem
+  chez ModemManager (disparition puis retour) ; au timeout : WARNING
+  journalisé, pas de boucle, le cycle suivant décide.
+- **Idempotence par étape** : aucune écriture ne réécrit une valeur déjà
+  présente ; une tentative ne laisse jamais `authorized` à `0` sans le
+  signaler (échec persistant de ré-autorisation journalisé).
+- Chemin USB introuvable ⇒ **no-op journalisé** (WARNING), jamais
+  d'exception : le cycle de reconciliation n'est jamais cassé.
+
+Le chemin du périphérique USB est celui **rapporté par ModemManager**
+(champ `device` de `mmcli -m`, section System), porté par
+`ModemInfo.device_path` : il existe même sans netdev (cas PPP). Toute
+écriture sysfs passe par l'adaptateur testable
+`adapters/usb_device.py` (`UsbDeviceAdapter`, `RealUsbDevice`) : la cible est
+bornée (realpath du répertoire device devant se résoudre dans le vrai
+sous-arbre `…/usbN/<id>` contenant bien le fichier `authorized`). La
+politique (éligibilité, compteur par cycle, attente bornée) vit dans le
+service ; le worker `workers/reconciliation.py` ne fait que l'orchestrer.
+
 ### ProxyState Transitions
 
 ```

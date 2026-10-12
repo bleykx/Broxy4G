@@ -81,6 +81,7 @@ def parse_mmcli_modem(
         interface_name=interface_name,
         operator_id=fields.get("operator id"),
         operator_name=fields.get("operator name"),
+        device_path=device_path,
     )
 
 

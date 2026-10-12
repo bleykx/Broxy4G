@@ -16,6 +16,7 @@ from broxy4g.adapters.net_interface import RealInterface
 from broxy4g.adapters.nftables_real import RealNftables
 from broxy4g.adapters.routing_real import RealRouting
 from broxy4g.adapters.shell_real import RealShell
+from broxy4g.adapters.usb_device import RealUsbDevice
 from broxy4g.api.app import create_app
 from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.database import create_engine, create_session_factory, init_db
@@ -23,6 +24,7 @@ from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
 from broxy4g.services.routing_slot_migration import RoutingSlotMigration
 from broxy4g.services.uplink_routes import UplinkRouteService
+from broxy4g.services.usb_recovery import UsbRecoveryService
 from broxy4g.workers.discovery import DiscoveryWorker
 from broxy4g.workers.reconciliation import ReconciliationWorker
 
@@ -81,6 +83,13 @@ async def run_workers(app, stop_event: asyncio.Event, work_dir: str):
     connectivity = RealConnectivity(shell)
     
     discovery = DiscoveryWorker(modem, app.state.dongle_repo, apn_source=app.state.apn_source)
+    worker_uplink_routes = UplinkRouteService(modem, routing)
+    usb_recovery = UsbRecoveryService(
+        app.state.dongle_repo,
+        worker_uplink_routes,
+        RealUsbDevice(),
+        reset_lock=app.state.reset_lock,
+    )
     reconciliation = ReconciliationWorker(
         dongle_repo=app.state.dongle_repo,
         proxy_repo=app.state.proxy_repo,
@@ -92,11 +101,12 @@ async def run_workers(app, stop_event: asyncio.Event, work_dir: str):
         provisioning=app.state.provisioning,
         docker_compose=app.state.docker_compose,
         metrics_snapshot=app.state.metrics_snapshot,
-        uplink_routes=UplinkRouteService(modem, routing),
+        uplink_routes=worker_uplink_routes,
         slot_migration=RoutingSlotMigration(app.state.dongle_repo, app.state.proxy_repo),
         isolation=app.state.isolation,
         reset_lock=app.state.reset_lock,
         local_connections=app.state.local_connections_service,
+        usb_recovery=usb_recovery,
     )
 
     async def discovery_loop():
