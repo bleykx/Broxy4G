@@ -10,9 +10,15 @@ WORKDIR /app/frontend
 # dangling link) must never be able to shadow them.
 COPY frontend/ ./
 # --include=dev is explicit: the build needs devDependencies (tsc, vite).
+# NODE_OPTIONS disables Node 20's "happy eyeballs" (autoSelectFamily) path.
+# On a host whose IPv6 route is blackholed/flaky (this Raspberry Pi, where DNS
+# resolution is already unstable) the buggy socket handling lets `npm ci` drain
+# its event loop and exit 0 with a HALF-INSTALLED node_modules (npm/cli#6409),
+# which then only shows up as a misleading `sh: tsc: not found` in the next step.
+# `--no-audit --no-fund` also cut the number of registry round-trips.
 # The `test -x` assertions fail fast, at this step and with a readable message,
-# instead of a late and obscure `sh: tsc: not found` in the build step below.
-RUN npm ci --include=dev \
+# instead of a late and obscure failure in the build step below.
+RUN NODE_OPTIONS=--no-network-family-autoselection npm ci --include=dev --no-audit --no-fund \
  && test -x node_modules/.bin/tsc \
  && test -x node_modules/.bin/vite
 RUN npm run build
