@@ -4,7 +4,9 @@
 FROM node:20-alpine AS frontend
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
-RUN npm ci
+# --include=dev is explicit: the build needs devDependencies (tsc, vite).
+# It also guards against a leaked NODE_ENV=production skipping them.
+RUN npm ci --include=dev
 COPY frontend/ ./
 RUN npm run build
 
