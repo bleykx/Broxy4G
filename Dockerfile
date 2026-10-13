@@ -3,11 +3,18 @@
 # Stage 1: build the frontend (multi-arch base image)
 FROM node:20-alpine AS frontend
 WORKDIR /app/frontend
-COPY frontend/package*.json ./
-# --include=dev is explicit: the build needs devDependencies (tsc, vite).
-# It also guards against a leaked NODE_ENV=production skipping them.
-RUN npm ci --include=dev
+# Copy the sources BEFORE installing: `npm ci` wipes and rebuilds node_modules
+# from the lockfile, so nothing coming from the build context can clobber the
+# freshly installed dependencies. This matters because tsc/vite live in
+# devDependencies, and a stale host node_modules (whose .bin/tsc may be a
+# dangling link) must never be able to shadow them.
 COPY frontend/ ./
+# --include=dev is explicit: the build needs devDependencies (tsc, vite).
+# The `test -x` assertions fail fast, at this step and with a readable message,
+# instead of a late and obscure `sh: tsc: not found` in the build step below.
+RUN npm ci --include=dev \
+ && test -x node_modules/.bin/tsc \
+ && test -x node_modules/.bin/vite
 RUN npm run build
 
 # Stage 2: Docker CLI + compose plugin, from the official multi-arch image
