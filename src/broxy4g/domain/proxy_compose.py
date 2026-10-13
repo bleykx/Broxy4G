@@ -25,6 +25,11 @@ def render_docker_compose(spec: ComposeSpec) -> str:
 
     Le bloc ``ports:`` n'est émis que si ``bind_ip`` est défini ; sinon le
     conteneur reste présent (service) mais n'est publié sur aucune interface.
+
+    Le réseau pose ``com.docker.network.bridge.enable_ip_masquerade: "false"`` :
+    le masquerade POSTROUTING propre à Docker sur le sous-réseau proxy est
+    désactivé, pour que la chaîne nftables ``proxy_nat`` (masquerade conditionné
+    à l'interface du dongle lié) reste le seul SNAT légitime.
     """
     lines = [
         f"name: {spec.project_name}",
@@ -49,6 +54,8 @@ def render_docker_compose(spec: ComposeSpec) -> str:
         f"  {spec.network_name}:",
         f"    name: {spec.network_name}",
         "    driver: bridge",
+        "    driver_opts:",
+        '      com.docker.network.bridge.enable_ip_masquerade: "false"',
         "    ipam:",
         "      config:",
         f"        - subnet: {spec.subnet}",

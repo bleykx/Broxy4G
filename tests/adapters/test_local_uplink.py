@@ -113,6 +113,74 @@ class TestRealLocalUplinkDefaultGateway:
         assert await uplink.default_gateway("eth0") is None
 
 
+class TestRealLocalUplinkLinkState:
+    def _sys(self, tmp_path, name="eth0", files: dict[str, str] | None = None):
+        if files:
+            (tmp_path / name).mkdir(parents=True, exist_ok=True)
+            for attr, value in files.items():
+                (tmp_path / name / attr).write_text(value + "\n")
+        return tmp_path
+
+    async def test_operstate_up(self, tmp_path):
+        sys_net = self._sys(tmp_path, files={"operstate": "up"})
+        uplink = RealLocalUplink(FakeShell(), sys_class_net=sys_net)
+        assert await uplink.link_state("eth0") == "up"
+
+    async def test_operstate_lowerlayerdown_is_down(self, tmp_path):
+        sys_net = self._sys(tmp_path, files={"operstate": "lowerlayerdown"})
+        uplink = RealLocalUplink(FakeShell(), sys_class_net=sys_net)
+        assert await uplink.link_state("eth0") == "down"
+
+    async def test_operstate_unreadable_falls_back_to_carrier(self, tmp_path):
+        sys_net = self._sys(tmp_path, files={"carrier": "1"})
+        uplink = RealLocalUplink(FakeShell(), sys_class_net=sys_net)
+        assert await uplink.link_state("eth0") == "up"
+
+    async def test_carrier_zero_is_down(self, tmp_path):
+        sys_net = self._sys(tmp_path, files={"carrier": "0"})
+        uplink = RealLocalUplink(FakeShell(), sys_class_net=sys_net)
+        assert await uplink.link_state("eth0") == "down"
+
+    async def test_neither_file_readable_is_unknown(self, tmp_path):
+        uplink = RealLocalUplink(FakeShell(), sys_class_net=tmp_path)
+        assert await uplink.link_state("eth0") == "unknown"
+
+
+class TestRealLocalUplinkDns:
+    DNS_CMD = ["resolvectl", "dns", "eth0"]
+
+    def _uplink(self, tmp_path, resolv_conf: str | None):
+        if resolv_conf is not None:
+            (tmp_path / "resolv.conf").write_text(resolv_conf)
+        return RealLocalUplink(
+            FakeShell(), sys_class_net=tmp_path, resolv_conf=tmp_path / "resolv.conf"
+        )
+
+    async def test_resolvectl_ips_parsed(self, tmp_path):
+        shell = FakeShell()
+        shell.set_response(self.DNS_CMD, ShellResult(0, "eth0: 192.168.1.1 10.0.0.53\n", ""))
+        uplink = RealLocalUplink(shell, sys_class_net=tmp_path, resolv_conf=tmp_path / "r")
+        assert await uplink.dns("eth0") == ["192.168.1.1", "10.0.0.53"]
+
+    async def test_resolvctl_failure_falls_back_to_resolv_conf(self, tmp_path):
+        # FakeShell par défaut : rc=1 → repli /etc/resolv.conf.
+        uplink = self._uplink(tmp_path, "# comment\nnameserver 192.168.1.1\nnameserver 9.9.9.9\n")
+        assert await uplink.dns("eth0") == ["192.168.1.1", "9.9.9.9"]
+
+    async def test_resolvctl_without_iface_line_falls_back(self, tmp_path):
+        (tmp_path / "resolv.conf").write_text("nameserver 1.1.1.1\n")
+        shell = FakeShell()
+        shell.set_response(self.DNS_CMD, ShellResult(0, "eth1: 10.0.0.1\n", ""))
+        uplink = RealLocalUplink(
+            shell, sys_class_net=tmp_path, resolv_conf=tmp_path / "resolv.conf"
+        )
+        assert await uplink.dns("eth0") == ["1.1.1.1"]
+
+    async def test_unavailable_everywhere_is_none(self, tmp_path):
+        uplink = self._uplink(tmp_path, None)
+        assert await uplink.dns("eth0") is None
+
+
 class TestFakeLocalUplink:
     async def test_interfaces_and_gateways(self):
         fake = FakeLocalUplink()
@@ -133,3 +201,17 @@ class TestFakeLocalUplink:
         fake = FakeLocalUplink()
         assert await fake.list_interfaces() == []
         assert await fake.default_gateway("eth0") is None
+        assert await fake.link_state("eth0") == "unknown"
+        assert await fake.dns("eth0") is None
+
+    async def test_link_state_and_dns(self):
+        fake = FakeLocalUplink()
+        fake.set_link_state("eth0", "up")
+        fake.set_dns("eth0", ["192.168.1.1"])
+        fake.set_link_state("eth1", None)
+        fake.set_dns("eth1", None)
+
+        assert await fake.link_state("eth0") == "up"
+        assert await fake.dns("eth0") == ["192.168.1.1"]
+        assert await fake.link_state("eth1") == "unknown"
+        assert await fake.dns("eth1") is None

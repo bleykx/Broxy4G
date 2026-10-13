@@ -122,10 +122,13 @@ class ProxyLifecycleService:
         await self._apply_isolation()
 
     async def _release_pinning(self, proxy: Proxy) -> None:
+        # On retire la règle fwmark du proxy, mais la table dédiée garde un
+        # plancher ``default`` (unreachable) : une table dédiée ne doit JAMAIS
+        # se retrouver sans route ``default`` (sinon repli sur ``main`` = fuite).
         if self.routing is None or not proxy.route_table_id or not proxy.fwmark:
             return
         await self.routing.remove_rule(proxy.route_table_id, proxy.fwmark)
-        await self.routing.remove_route(proxy.route_table_id, "default")
+        await self.routing.add_barrier_route(proxy.route_table_id)
 
     # --- lecture -----------------------------------------------------------
 

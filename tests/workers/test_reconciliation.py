@@ -191,7 +191,12 @@ async def test_reconcile_all_repairs_slot_duplicates_before_dongles(
 
 
 async def test_reconcile_all_order_proxies_network_isolation(reconciliation_worker):
-    """Ordre du cycle : proxies → passerelle réseau proxy → isolation."""
+    """Ordre du cycle : passerelle réseau proxy → isolation → proxies → isolation finale.
+
+    Un conteneur proxy ne démarre que lorsque le réseau Docker et
+    l'isolation (droits de sortie, plancher) sont déjà en place ; la
+    réapplication finale reste idempotente.
+    """
     calls: list[str] = []
 
     async def record_proxies():
@@ -222,7 +227,7 @@ async def test_reconcile_all_order_proxies_network_isolation(reconciliation_work
     ):
         await reconciliation_worker.reconcile_all()
 
-    assert calls == ["proxies", "proxy_network", "isolation"]
+    assert calls == ["proxy_network", "isolation", "proxies", "isolation"]
 
 
 async def test_reconcile_all_proxy_network_failure_does_not_break_cycle(
@@ -244,7 +249,34 @@ async def test_reconcile_all_proxy_network_failure_does_not_break_cycle(
         await reconciliation_worker.reconcile_all()
 
     mock_ensure.assert_awaited_once()
-    mock_isolation.assert_awaited_once()
+    # L'isolation est réappliquée avant ET après les proxies (idempotente).
+    assert mock_isolation.await_count == 2
+
+
+async def test_reconcile_dongle_repairs_uplink_routes_before_proxy(
+    reconciliation_worker, enrollment_service, fake_modem, fake_iface, fake_connectivity
+):
+    """La route/plancher de la table est stabilisée AVANT le conteneur du proxy."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    add_modem(fake_modem)
+    fake_connectivity.set_public_ip("1.2.3.4")
+    calls: list[str] = []
+
+    with (
+        patch.object(
+            reconciliation_worker,
+            "_repair_uplink_routes",
+            new=AsyncMock(side_effect=lambda _d: calls.append("routes")),
+        ),
+        patch.object(
+            reconciliation_worker.proxy_reconciler,
+            "restore_dongle_proxy",
+            new=AsyncMock(side_effect=lambda _d: calls.append("proxy")),
+        ),
+    ):
+        await reconciliation_worker.reconcile_dongle(dongle.id)
+
+    assert calls == ["routes", "proxy"]
 
 
 async def test_reconcile_all_repairs_duplicate_slot_and_repins_local_proxy(

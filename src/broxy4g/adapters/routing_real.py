@@ -8,6 +8,10 @@ from .shell import ShellAdapter
 # Les noms d'interface peuvent contenir des tirets : pas de \w+ ici.
 _DEFAULT_ROUTE_RE = re.compile(r"^default(?:\s+via\s+(?P<via>\S+))?\s+dev\s+(?P<dev>[A-Za-z0-9._:@-]+)")
 
+# Plancher de table : "unreachable default" (idem "blackhole default",
+# "prohibit default") — sans dev, _DEFAULT_ROUTE_RE ne le verrait pas.
+_BARRIER_ROUTE_RE = re.compile(r"^(?P<type>unreachable|blackhole|prohibit)\s+default\b")
+
 
 class RealRouting:
     def __init__(self, shell: ShellAdapter):
@@ -55,6 +59,14 @@ class RealRouting:
         elif via is None:
             cmd.extend(["scope", "link"])
         await self._run_checked("ip route replace", cmd)
+
+    async def add_barrier_route(self, table_id: int) -> None:
+        # Plancher : une table dédiée ne doit jamais être vide, sinon le noyau
+        # retombe sur la route par défaut de la table main (fuite vers l'uplink hôte).
+        await self._run_checked(
+            "ip route replace unreachable",
+            ["ip", "route", "replace", "unreachable", "default", "table", str(table_id)],
+        )
 
     async def remove_route(self, table_id: int, dest: str) -> None:
         await self.shell.run(["ip", "route", "del", dest, "table", str(table_id)])
@@ -105,7 +117,19 @@ class RealRouting:
 
         routes = []
         for line in result.stdout.splitlines():
-            match = _DEFAULT_ROUTE_RE.match(line.strip())
+            line = line.strip()
+            barrier = _BARRIER_ROUTE_RE.match(line)
+            if barrier:
+                # Plancher de table (ex. "unreachable default") : idempotence.
+                routes.append(RoutingRoute(
+                    table_id=table_id,
+                    dest="default",
+                    via=None,
+                    dev=None,
+                    type=barrier.group("type"),
+                ))
+                continue
+            match = _DEFAULT_ROUTE_RE.match(line)
             if not match:
                 # Routes non-default (ex. "10.159.56.32/27 dev dongle-1336
                 # proto kernel scope link src 10.159.56.48") : ignorées.

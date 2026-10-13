@@ -22,6 +22,9 @@ class RoutingAdapter(Protocol):
     async def add_route(self, table_id: int, dest: str, via: str | None, dev: str) -> None:
         ...
 
+    async def add_barrier_route(self, table_id: int) -> None:
+        ...
+
     async def remove_route(self, table_id: int, dest: str) -> None:
         ...
 
@@ -46,7 +49,9 @@ class RoutingRoute:
     table_id: int
     dest: str
     via: str | None
-    dev: str
+    dev: str | None = None
+    # "unicast" ou "unreachable" (plancher anti-fuite vers la table main).
+    type: str = "unicast"
 
 
 class FakeRouting:
@@ -76,6 +81,11 @@ class FakeRouting:
 
     def remove_route_sync(self, table_id: int, dest: str) -> None:
         self._routes = [r for r in self._routes if not (r.table_id == table_id and r.dest == dest)]
+
+    async def add_barrier_route(self, table_id: int) -> None:
+        # Retire toute route default de la table puis pose le plancher.
+        self.remove_route_sync(table_id, "default")
+        self._routes.append(RoutingRoute(table_id, "default", None, None, type="unreachable"))
 
     async def remove_route(self, table_id: int, dest: str) -> None:
         self.remove_route_sync(table_id, dest)

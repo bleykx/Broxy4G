@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../../lib/api';
 import { errorMessage } from '../../lib/errors';
-import { LocalConnection } from '../../types/api';
+import { LocalConnection, ProxyDetail } from '../../types/api';
 import { LocalConnectionRow } from '../../components/LocalConnectionRow';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 
 // Enrolled local uplinks on the dashboard: list + unenroll only.
 export const LocalUplinksSection: React.FC = () => {
   const [connections, setConnections] = useState<LocalConnection[]>([]);
+  const [proxies, setProxies] = useState<ProxyDetail[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [unenrollTarget, setUnenrollTarget] = useState<LocalConnection | null>(null);
@@ -15,14 +16,18 @@ export const LocalUplinksSection: React.FC = () => {
   const [unenrollError, setUnenrollError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    try {
-      setConnections(await api.localConnections.list());
+    const [conns, proxs] = await Promise.allSettled([
+      api.localConnections.list(),
+      api.proxies.list(),
+    ]);
+    if (conns.status === 'fulfilled') {
+      setConnections(conns.value);
       setError(null);
-    } catch {
+    } else {
       setError('Failed to load local uplinks.');
-    } finally {
-      setLoading(false);
     }
+    setProxies(proxs.status === 'fulfilled' ? proxs.value : []);
+    setLoading(false);
   }, []);
 
   useEffect(() => {
@@ -47,6 +52,7 @@ export const LocalUplinksSection: React.FC = () => {
   };
 
   const enrolled = connections.filter(c => c.enrolled);
+  const proxyById = new Map(proxies.map(p => [p.id, p]));
 
   if (error) {
     return (
@@ -71,6 +77,7 @@ export const LocalUplinksSection: React.FC = () => {
             connection={c}
             busy={false}
             disabled={unenrolling}
+            proxy={c.proxy_id ? proxyById.get(c.proxy_id) ?? null : null}
             onUnenroll={() => { setUnenrollError(null); setUnenrollTarget(c); }}
           />
         ))}

@@ -278,6 +278,24 @@ body {
   margin-bottom: 1rem;
 }
 
+/* Local uplink row: details link + proxy state value */
+.details-link {
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.details-link:hover {
+  text-decoration: underline;
+}
+
+.proxy-row-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .metric-row {
   display: flex;
   justify-content: space-between;

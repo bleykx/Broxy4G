@@ -87,6 +87,21 @@ bearer courant (`ip route show table <id>`) et répare toute dérive (ex. une
 route `default via <gw LAN> dev eth0` écrasée dans la table du dongle) sans
 reconnexion.
 
+#### Plancher anti-fuite de la table dédiée (`default unreachable`)
+
+Une table de routage dédiée ne doit **jamais** rester sans route `default` :
+sinon le noyau retombe sur la dernière règle `32767 main` et le trafic marqué
+du dongle suit la route par défaut de l'hôte (fuite par `eth0`). Chaque table
+dédiée reçoit donc le plancher `ip route replace unreachable default table <T>`
+**dès l'allocation du slot** (`services/uplink_routes.py`, réutilisée par
+`ConnectionService.connect` et par la reconciliation). Au teardown, à l'échec
+ou à la perte de l'état actif, la route réelle est **remplacée** par le
+plancher : la table n'est jamais vide et le trafic qui essaie d'y sortir
+reçoit `EHOSTUNREACH` — diagnostiquable, au lieu d'être silencieusement routé
+par l'uplink de l'hôte. La `ip rule fwmark` et le slot (`route_table_id`/
+`fwmark`) sont **conservés** : la table reste épinglée au dongle, et la
+reconciliation repose la route réelle dès que le bearer est de retour.
+
 ## nftables Isolation
 
 Implémenté par `adapters/nftables_real.py` (`RealNftables`), piloté par
@@ -107,7 +122,7 @@ Toutes les règles vivent dans une seule table `ip broxy4g` (constante
 | --- | --- | --- | --- |
 | `proxy_mark` | `filter` / `prerouting` | `-150` | Marque le trafic **sortant** du proxy selon son IP source ; laisse passer le retour des connexions entrantes (DNAT) |
 | `proxy_nat` | `nat` / `postrouting` | `100` | Mascare le trafic proxy sur l'interface du dongle |
-| `proxy_filter` | `filter` / `forward` | `0` | N'autorise le forward **sortant** que via l'interface du dongle |
+| `proxy_filter` | `filter` / `forward` | `0` | Autorise le forward **sortant** via l'interface du dongle ; deny-by-default scopé au sous-réseau proxy (exception intra-sous-réseau) |
 
 ### Règles générées
 
@@ -128,17 +143,31 @@ table ip broxy4g {
     chain proxy_filter {
         type filter hook forward priority 0; policy accept
         ip saddr 172.28.0.101 ct status dnat accept
-        ip saddr 172.28.0.101 oifname != "wwan0" drop
+        ip saddr 172.28.0.101 oifname "wwan0" accept
+        ip saddr 172.28.0.0/16 ip daddr 172.28.0.0/16 accept
+        ip saddr 172.28.0.0/16 drop
     }
 }
 ```
 
 - La règle de `proxy_nat` est dédupliquée par interface : une seule règle de
   masquerade par uplink, quel que soit le nombre de proxies.
-- La règle de `proxy_filter` se limite aux états dongle où l'interface est
-  considérée active (`NetworkIsolationService.ACTIVE_INTERFACE_STATES` =
-  `ONLINE`, `DEGRADED`, `CONNECTING`). Un dongle hors de ces états ne produit
-  qu'une règle de marquage, jamais de forward autorisé.
+- La règle `accept` positive de `proxy_filter`
+  (`ip saddr <ip> oifname "<iface>" accept`) n'est émise que pour un dongle
+  dont l'interface est active ET connue (`ACTIVE_INTERFACE_STATES` = `ONLINE`,
+  `DEGRADED`, `CONNECTING`). Le catch-all `ip saddr 172.28.0.0/16 drop` est
+  émis **inconditionnellement**, quel que soit l'état du dongle : un dongle
+  hors des états actifs (ou un proxy sans fwmark, une IP hors plage) n'a donc
+  AUCUN `accept` de sortie ⇒ aucun réseau, aucune fuite par l'uplink de
+  l'hôte (deny-by-default scopé au sous-réseau proxy).
+- **Exception intra-sous-réseau** : la règle
+  `ip saddr 172.28.0.0/16 ip daddr 172.28.0.0/16 accept` est émise **avant** le
+  catch-all, indépendamment des bindings (elle existe même sans aucun proxy).
+  Avec `br_netfilter` (actif par défaut avec Docker), le trafic IPv4 entre deux
+  conteneurs du **même** bridge traverse aussi le hook `forward` : c'est du
+  transit interne au bridge, pas un uplink, il ne doit donc pas être droppé.
+  Toute destination **hors** sous-réseau reste refusée par le catch-all : cette
+  exception n'ouvre aucune sortie vers l'hôte.
 - **Retour des connexions entrantes (DNAT).** Quand un client du LAN joint le
   port publié d'un proxy, le conteneur répond avec sa propre IP source. Ce
   paquet de retour fait partie d'une connexion DNATée (`ct status dnat`) : la
@@ -262,6 +291,44 @@ Limite explicite : partant de l'hôte, la sonde ne couvre pas un drop dans
 la chaîne FORWARD (le parcours d'ingrès d'un paquet venant du LAN n'est pas
 reproduit). Sans namespace réseau dédié, ce n'est pas mesurable depuis
 l'hôte — c'est un choix assumé, à ne pas « corriger » par la sonde.
+
+## Masquerade Docker désactivé
+
+Le réseau `broxy4g-net` est rendu par le compose de chaque proxy
+(`domain/proxy_compose.py`) avec l'option
+`com.docker.network.bridge.enable_ip_masquerade: "false"` :
+
+```yaml
+networks:
+  broxy4g-net:
+    name: broxy4g-net
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+```
+
+**Pourquoi** : sans cette option, Docker installe son propre masquerade
+POSTROUTING sur `172.28.0.0/16` ; il SNATe le trafic fuyant du sous-réseau
+proxy et le rend effectivement routable sur l'uplink de l'hôte. Notre chaîne
+`proxy_nat` (masquerade conditionné à l'interface du dongle lié :
+`oifname "<iface>" ip saddr 172.28.0.0/16 masquerade`) doit rester le **seul**
+SNAT légitime.
+
+**Mise à jour d'une installation existante** : Docker n'applique cette option
+qu'à la **création** du réseau ; modifier le compose ne change pas un réseau
+déjà existant. Procédure :
+
+1. Arrêter les proxies (arrêter/stopper les conteneurs) ;
+2. `docker network rm broxy4g-net` ;
+3. Relancer / réconcilier — le réseau est recréé par le compose, avec l'option
+   appliquée ;
+4. Vérifier :
+   `docker network inspect broxy4g-net --format '{{index .Options "com.docker.network.bridge.enable_ip_masquerade"}}'`
+   (attendu : `false`), puis la passerelle `172.28.0.1/16` sur le bridge
+   (`ip -4 addr show br-<id>`).
 
 ## Isolation Guarantees
 

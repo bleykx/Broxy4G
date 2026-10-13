@@ -170,6 +170,7 @@ def create_app(
         app.state.dongle_repo,
         app.state.routing_allocator,
         app.state.isolation,
+        proxy_health=app.state.proxy_health_service,
     )
     app.state.enrollment_service = EnrollmentService(
         app.state.dongle_repo,

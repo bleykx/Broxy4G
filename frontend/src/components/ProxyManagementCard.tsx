@@ -9,13 +9,21 @@ import { MetricRow } from './MetricRow';
 import { PROXY_CONFIRM, ProxyConfirmKind } from './proxyConfirmation';
 
 interface ProxyManagementCardProps {
-  dongleId: string;
+  // Only required when the card may offer proxy creation (dongle pages).
+  dongleId?: string;
   proxy: ProxyDetail | null;
   onChanged: () => void;
   actionsDisabled?: boolean;
+  emptyMessage?: string;
 }
 
-export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({ dongleId, proxy, onChanged, actionsDisabled = false }) => {
+export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({
+  dongleId,
+  proxy,
+  onChanged,
+  actionsDisabled = false,
+  emptyMessage,
+}) => {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ProxyConfirmKind | null>(null);
@@ -102,11 +110,15 @@ export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({ dongle
         </>
       ) : (
         <div className="proxy-empty">
-          <p>No proxy configured for this dongle.</p>
-          <p className="proxy-hint">The listen port is allocated automatically.</p>
-          <button className="btn btn-primary" disabled={disabled} onClick={() => execute('create', () => api.proxies.create(dongleId, {}))}>
-            {busy === 'create' ? 'Creating…' : 'Create Proxy'}
-          </button>
+          <p>{emptyMessage ?? 'No proxy configured for this dongle.'}</p>
+          {dongleId && (
+            <>
+              <p className="proxy-hint">The listen port is allocated automatically.</p>
+              <button className="btn btn-primary" disabled={disabled} onClick={() => execute('create', () => api.proxies.create(dongleId, {}))}>
+                {busy === 'create' ? 'Creating…' : 'Create Proxy'}
+              </button>
+            </>
+          )}
         </div>
       )}
 

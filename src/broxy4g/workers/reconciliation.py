@@ -83,8 +83,12 @@ class ReconciliationWorker:
                 await self.reconcile_dongle(dongle.id)
             except Exception:
                 logger.exception("Reconciliation échouée pour dongle %s", dongle.id)
-        await self.reconcile_proxies()
+        # Un conteneur proxy ne doit jamais démarrer avant que le réseau Docker
+        # et l'isolation (droits de sortie + plancher) soient en place.
         await self._ensure_proxy_network()
+        await self._reapply_isolation()
+        await self.reconcile_proxies()
+        # Réalignement final idempotent, après le démarrage des conteneurs.
         await self._reapply_isolation()
 
     async def _repair_slot_duplicates(self) -> None:
@@ -161,10 +165,12 @@ class ReconciliationWorker:
             if refreshed is not None:
                 dongle = refreshed
 
-        await self.proxy_reconciler.restore_dongle_proxy(dongle)
-        # (Re)pose des routes d'uplink SANS reconnexion : sur un dongle déjà
-        # actif (connect() sauté), une route écrasée est détectée et réparée ici.
+        # (Re)pose des routes d'uplink SANS reconnexion AVANT le démarrage du
+        # conteneur proxy : la route réelle ou le plancher de la table dédiée
+        # doit être stabilisé d'abord. Sur un dongle déjà actif (connect()
+        # sauté), une route écrasée est détectée et réparée ici.
         await self._repair_uplink_routes(dongle)
+        await self.proxy_reconciler.restore_dongle_proxy(dongle)
         await self._verify_connectivity(dongle)
 
     async def _attempt_usb_recovery(self, dongle) -> None:

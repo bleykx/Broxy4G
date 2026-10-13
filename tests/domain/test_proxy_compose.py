@@ -21,6 +21,7 @@ def test_render_contains_key_fields():
     assert '"/var/lib/broxy4g/proxies/abc/3proxy.cfg:/etc/3proxy/3proxy.cfg:ro"' in text
     assert "ipv4_address: 172.28.0.101" in text
     assert "subnet: 172.28.0.0/16" in text
+    assert 'com.docker.network.bridge.enable_ip_masquerade: "false"' in text
     assert text.endswith("\n")
 
 

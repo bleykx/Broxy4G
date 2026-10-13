@@ -4,6 +4,7 @@ import { Dashboard } from './pages/Dashboard';
 import { DongleDetailPage } from './pages/DongleDetailPage';
 import { EnrollDonglePage } from './pages/EnrollDonglePage';
 import { LocalUplinkPage } from './pages/LocalUplinkPage';
+import { LocalUplinkDetailPage } from './pages/LocalUplinkDetailPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { LoginOverlay } from './components/LoginOverlay';
 import { api } from './lib/api';
@@ -54,6 +55,7 @@ const App: React.FC = () => {
             <Route path="/dongles/new" element={<EnrollDonglePage />} />
             <Route path="/dongles/:id" element={<DongleDetailPage />} />
             <Route path="/local/new" element={<LocalUplinkPage />} />
+            <Route path="/local/:interface_name" element={<LocalUplinkDetailPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </main>

@@ -113,6 +113,48 @@ async def test_list_routes_parses_default_without_gateway():
     assert routes == [RoutingRoute(table_id=10001, dest="default", via=None, dev="wwan1")]
 
 
+async def test_add_barrier_route_uses_exact_unreachable_command():
+    """Plancher : la commande exacte est 'ip route replace unreachable default table <T>'."""
+    shell = AsyncMock(spec=ShellAdapter)
+    shell.run.return_value = ShellResult(returncode=0, stdout="", stderr="")
+    routing = RealRouting(shell)
+
+    await routing.add_barrier_route(10001)
+
+    shell.run.assert_awaited_once_with(
+        ["ip", "route", "replace", "unreachable", "default", "table", "10001"]
+    )
+
+
+async def test_list_routes_parses_unreachable_barrier():
+    """'unreachable default' (plancher) doit être rapporté pour l'idempotence."""
+    routing = _routing_with_output("unreachable default\n")
+
+    routes = await routing.list_routes(10001)
+
+    assert routes == [RoutingRoute(table_id=10001, dest="default", via=None, dev=None,
+                                   type="unreachable")]
+
+
+async def test_fake_barrier_route_floor_and_real_route_overrides_it():
+    """FakeRouting : plancher sur table vide, écrasé par une route réelle."""
+    from broxy4g.adapters.routing import FakeRouting
+    fake = FakeRouting()
+
+    assert await fake.list_routes(10001) == []
+
+    await fake.add_barrier_route(10001)
+    assert await fake.list_routes(10001) == [
+        RoutingRoute(table_id=10001, dest="default", via=None, dev=None, type="unreachable")
+    ]
+
+    # Une route réelle écrase le plancher (une seule default par table).
+    await fake.add_route(10001, "default", "10.159.56.49", "dongle-1336")
+    assert await fake.list_routes(10001) == [
+        RoutingRoute(table_id=10001, dest="default", via="10.159.56.49", dev="dongle-1336")
+    ]
+
+
 async def test_list_rules_parses_fwmark_and_source_rules():
     """Parser indépendant de l'ordre des champs (fwmark hexa + règle source)."""
     stdout = (

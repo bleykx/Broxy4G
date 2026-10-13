@@ -20,6 +20,7 @@ from broxy4g.services.local_connections import LocalConnectionsService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot
 from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.proxy_files import ProxyFileWriter, ProxyPaths
+from broxy4g.services.proxy_health import ProxyHealthService
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
 from broxy4g.services.proxy_ports import PortAllocator
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
@@ -186,10 +187,20 @@ def proxy_service(proxy_repo, provisioning, isolation, fake_routing):
     )
 
 
+async def _always_reachable(target: str, port: int) -> bool:
+    return True
+
+
+@pytest.fixture
+def proxy_health(proxy_repo, fake_docker_compose):
+    # Probe injectable : aucun réseau réel dans les tests de services.
+    return ProxyHealthService(proxy_repo, fake_docker_compose, probe=_always_reachable)
+
+
 @pytest.fixture
 def local_connections(
     fake_local_uplink, proxy_repo, proxy_service, fake_routing, dongle_repo,
-    routing_allocator, isolation,
+    routing_allocator, isolation, proxy_health,
 ):
     return LocalConnectionsService(
         fake_local_uplink,
@@ -199,6 +210,7 @@ def local_connections(
         dongle_repo,
         routing_allocator,
         isolation,
+        proxy_health=proxy_health,
     )
 
 

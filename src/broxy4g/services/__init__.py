@@ -1,4 +1,5 @@
-from .connection import ConnectionService, DongleMetrics
+from .connection import ConnectionService
+from .dongle_diagnostics import DongleMetrics
 from .enrollment import EnrollmentService
 from .proxy_lifecycle import ProxyLifecycleService
 from .reset import ResetService

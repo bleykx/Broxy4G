@@ -402,14 +402,18 @@ Lists the host interfaces usable as proxy uplinks and whether each is enrolled.
     "ip": "192.168.1.10",
     "kind": "ethernet",
     "enrolled": false,
-    "proxy_id": null
+    "proxy_id": null,
+    "gateway": "192.168.1.1",
+    "link_state": "up"
   },
   {
     "interface_name": "wlan0",
     "ip": "192.168.1.22",
     "kind": "wifi",
     "enrolled": true,
-    "proxy_id": "123e4567-e89b-12d3-a456-426614174000"
+    "proxy_id": "123e4567-e89b-12d3-a456-426614174000",
+    "gateway": null,
+    "link_state": "down"
   }
 ]
 ```
@@ -417,8 +421,54 @@ Lists the host interfaces usable as proxy uplinks and whether each is enrolled.
 - `kind` is one of `ethernet`, `wifi`, `other`.
 - `enrolled` is `true` when a persisted proxy already exists for the interface;
   `proxy_id` then holds its id.
+- `gateway` is the interface's default IPv4 gateway (`null` when none).
+- `link_state` is one of `up`, `down`, `unknown` (sysfs `operstate`, falling
+  back to `carrier`; `unknown` when neither is readable).
 - WWAN (dongle/modem) interfaces are excluded, as are interfaces currently used
   by an enrolled dongle.
+
+#### Get Local Connection Detail
+
+**GET** `/api/v1/local-connections/{interface_name}`
+
+Returns the full detail of a single host interface: link state, gateway,
+effective DNS servers, the enrolled proxy (if any) and its health.
+
+**Response**
+```json
+{
+  "interface_name": "eth0",
+  "ip": "192.168.1.10",
+  "kind": "ethernet",
+  "gateway": "192.168.1.1",
+  "link_state": "up",
+  "dns": ["192.168.1.1", "8.8.8.8"],
+  "enrolled": true,
+  "proxy_id": "123e4567-e89b-12d3-a456-426614174000",
+  "proxy": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "source_type": "local",
+    "source_ref": "eth0",
+    "interface_name": "eth0",
+    "container_name": "broxy4g-proxy-...",
+    "listen_port": 8080,
+    "state": "CONFIGURED",
+    "enabled": true
+  },
+  "proxy_health": "healthy",
+  "proxy_health_reason": null
+}
+```
+
+- `dns` is the per-interface DNS from `resolvectl`, falling back to the
+  `nameserver` entries of `/etc/resolv.conf`; `null` when unavailable.
+- `proxy` is the full proxy detail (same shape as `GET /api/v1/proxies/{id}`),
+  or `null` when the interface is not enrolled.
+- `proxy_health` is one of `healthy`, `unhealthy`, `unknown` — `null` when no
+  proxy is enrolled. `proxy_health_reason` explains an `unhealthy`/`unknown`
+  result.
+- Returns `404 Not Found` with a clean business message
+  (`interface inconnue: <name>`) when the interface does not exist on the host.
 
 #### Enroll Local Connection
 

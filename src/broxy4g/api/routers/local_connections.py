@@ -2,9 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from broxy4g.api.deps import get_local_connections_service, require_auth
 from broxy4g.api.routers.proxies import _detail
-from broxy4g.api.schemas.local_connection import LocalConnectionCreate, LocalConnectionDetail
+from broxy4g.api.schemas.local_connection import (
+    LocalConnectionCreate,
+    LocalConnectionDetail,
+    LocalConnectionView,
+)
 from broxy4g.api.schemas.proxy import ProxyWithPassword
-from broxy4g.services.local_connections import LocalConnectionsService
+from broxy4g.services.local_connections import LocalConnectionNotFound, LocalConnectionsService
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 
@@ -21,9 +25,36 @@ async def list_local_connections(
             kind=c.kind,
             enrolled=c.enrolled,
             proxy_id=c.proxy_id,
+            gateway=c.gateway,
+            link_state=c.link_state,
         )
         for c in connections
     ]
+
+
+@router.get("/local-connections/{interface_name}", response_model=LocalConnectionView)
+async def get_local_connection(
+    interface_name: str,
+    svc: LocalConnectionsService = Depends(get_local_connections_service),
+):
+    try:
+        view = await svc.get(interface_name)
+    except LocalConnectionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    health = view.proxy_health
+    return LocalConnectionView(
+        interface_name=view.interface_name,
+        ip=view.ip,
+        kind=view.kind,
+        gateway=view.gateway,
+        link_state=view.link_state,
+        dns=view.dns,
+        enrolled=view.enrolled,
+        proxy_id=view.proxy.id if view.proxy else None,
+        proxy=_detail(view.proxy) if view.proxy else None,
+        proxy_health=health.status if health else None,
+        proxy_health_reason=health.reason if health else None,
+    )
 
 
 @router.post("/local-connections", response_model=ProxyWithPassword)

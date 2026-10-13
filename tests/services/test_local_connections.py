@@ -5,6 +5,7 @@ from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.domain.proxy import ProxySource
 from broxy4g.domain.proxy_isolation import ISOLATION_TABLE
+from broxy4g.services.local_connections import LocalConnectionNotFound
 
 
 def _iface(name="eth0", ip="192.168.1.10", kind="ethernet"):
@@ -100,7 +101,11 @@ async def test_unenroll_releases_proxy_and_routing(
 
     assert await proxy_repo.get_by_source(ProxySource.LOCAL, "eth0") is None
     assert (await fake_routing.list_rules()) == []
-    assert (await fake_routing.list_routes(provisioned.proxy.route_table_id)) == []
+    # La règle fwmark est retirée, mais la table dédiée conserve son plancher
+    # `default unreachable` : elle n'est jamais laissée sans route `default`
+    # (sinon le noyau retombe sur la route par défaut de l'hôte = fuite).
+    routes = await fake_routing.list_routes(provisioned.proxy.route_table_id)
+    assert [(r.dest, r.type) for r in routes] == [("default", "unreachable")]
 
 
 @pytest.mark.asyncio
@@ -119,3 +124,88 @@ async def test_slot_allocation_avoids_dongle_tables(local_connections, dongle_re
 
     assert table_id == 10002
     assert fwmark == table_id - 10000
+
+
+@pytest.mark.asyncio
+async def test_list_all_includes_gateway_and_link_state(local_connections, fake_local_uplink):
+    fake_local_uplink.set_interfaces([_iface("eth0")])
+    fake_local_uplink.set_gateway("eth0", "192.168.1.1")
+    fake_local_uplink.set_link_state("eth0", "up")
+
+    connections = await local_connections.list_all()
+
+    assert connections[0].gateway == "192.168.1.1"
+    assert connections[0].link_state == "up"
+
+
+@pytest.mark.asyncio
+async def test_list_all_unknown_link_state_when_unreported(local_connections, fake_local_uplink):
+    fake_local_uplink.set_interfaces([_iface("eth0")])
+
+    connections = await local_connections.list_all()
+
+    assert connections[0].gateway is None
+    assert connections[0].link_state == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_get_returns_detail_without_proxy(local_connections, fake_local_uplink):
+    fake_local_uplink.set_interfaces([_iface("eth0")])
+    fake_local_uplink.set_gateway("eth0", "192.168.1.1")
+    fake_local_uplink.set_link_state("eth0", "down")
+    fake_local_uplink.set_dns("eth0", ["192.168.1.1", "1.1.1.1"])
+
+    detail = await local_connections.get("eth0")
+
+    assert detail.interface_name == "eth0"
+    assert detail.ip == "192.168.1.10"
+    assert detail.kind == "ethernet"
+    assert detail.gateway == "192.168.1.1"
+    assert detail.link_state == "down"
+    assert detail.dns == ["192.168.1.1", "1.1.1.1"]
+    assert detail.enrolled is False
+    assert detail.proxy is None
+    assert detail.proxy_health is None
+
+
+@pytest.mark.asyncio
+async def test_get_returns_detail_with_proxy_and_healthy_health(
+    local_connections, fake_local_uplink, fake_docker_compose
+):
+    fake_local_uplink.set_interfaces([_iface("eth0")])
+    fake_local_uplink.set_gateway("eth0", "192.168.1.1")
+    fake_local_uplink.set_dns("eth0", None)
+    provisioned = await local_connections.enroll("eth0")
+    fake_docker_compose.set_state(provisioned.proxy.container_name, "running")
+
+    detail = await local_connections.get("eth0")
+
+    assert detail.enrolled is True
+    assert detail.proxy is not None
+    assert detail.proxy.id == provisioned.proxy.id
+    assert detail.proxy_health is not None
+    assert detail.proxy_health.status == "healthy"
+    assert detail.proxy_health.reason is None
+
+
+@pytest.mark.asyncio
+async def test_get_health_unhealthy_when_container_stopped(
+    local_connections, fake_local_uplink, fake_docker_compose
+):
+    fake_local_uplink.set_interfaces([_iface("eth0")])
+    fake_local_uplink.set_gateway("eth0", "192.168.1.1")
+    provisioned = await local_connections.enroll("eth0")
+    fake_docker_compose.set_state(provisioned.proxy.container_name, "exited")
+
+    detail = await local_connections.get("eth0")
+
+    assert detail.proxy_health.status == "unhealthy"
+    assert "conteneur" in detail.proxy_health.reason
+
+
+@pytest.mark.asyncio
+async def test_get_unknown_interface_raises(local_connections, fake_local_uplink):
+    fake_local_uplink.set_interfaces([_iface("eth0")])
+
+    with pytest.raises(LocalConnectionNotFound, match="interface inconnue"):
+        await local_connections.get("eth9")

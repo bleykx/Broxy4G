@@ -5,8 +5,18 @@ from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.domain.proxy import Proxy, ProxySource
-from broxy4g.domain.proxy_isolation import ISOLATION_TABLE
+from broxy4g.domain.proxy_isolation import ISOLATION_TABLE, build_isolation_ruleset
+from broxy4g.domain.proxy_network import DOCKER_SUBNET
 from broxy4g.services.network_isolation import NetworkIsolationService
+
+# Exception intra-réseau (br_netfilter) : toujours juste avant le catch-all.
+_INTRA_ACCEPT = (f"ip saddr {DOCKER_SUBNET} ip daddr {DOCKER_SUBNET}", "accept")
+# Deny-by-default scopé au sous-réseau proxy : toujours en dernière position.
+_CATCH_ALL = (f"ip saddr {DOCKER_SUBNET}", "drop")
+
+
+def _filter_rules(ruleset):
+    return [(r.match, r.action) for r in _chains(ruleset)["proxy_filter"].rules]
 
 
 async def _seed_dongle(
@@ -61,18 +71,33 @@ async def test_bindings_skip_disabled_proxy_and_missing_fwmark(
     other = await _seed_dongle(dongle_repo, imei="123456789012346", interface="wwan1")
     await _seed_proxy(proxy_repo, other.id, ip="172.28.0.102", port=31202, enabled=False)
 
-    assert await isolation.bindings() == []
+    bindings = await isolation.bindings()
+    assert bindings == []
+    # Proxy sans fwmark : aucune sortie autorisée, le catch-all scelle le
+    # sous-réseau (l'exception intra-réseau reste présente).
+    ruleset = build_isolation_ruleset(bindings)
+    assert _filter_rules(ruleset) == [_INTRA_ACCEPT, _CATCH_ALL]
 
 
 async def test_bindings_drop_interface_when_dongle_offline(
-    isolation, dongle_repo, proxy_repo
+    isolation, dongle_repo, proxy_repo, fake_nft
 ):
     dongle = await _seed_dongle(dongle_repo, state=DongleState.OFFLINE)
     await _seed_proxy(proxy_repo, dongle.id)
 
     bindings = await isolation.bindings()
-
+    # Le proxy reste rattaché (retour DNAT + marquage) mais sans interface.
     assert bindings[0].interface_name is None
+
+    # Le ruleset appliqué refuse toute sortie proxy : pas de `accept` oifname,
+    # le catch-all scelle le sous-réseau.
+    await isolation.apply()
+    ruleset = await fake_nft.get_ruleset()
+    filter_rules = _filter_rules(ruleset)
+    assert not any(
+        "oifname" in match and action == "accept" for match, action in filter_rules
+    )
+    assert filter_rules[-1] == _CATCH_ALL
 
 
 async def _seed_local(proxy_repo, *, ip="172.28.0.150", fwmark=9, enabled=True):
@@ -123,13 +148,54 @@ async def test_apply_writes_isolation_table(isolation, dongle_repo, proxy_repo, 
     assert [(r.match, r.action) for r in chains["proxy_nat"].rules] == [
         ('oifname "wwan0" ip saddr 172.28.0.0/16', "masquerade")
     ]
+    assert _filter_rules(ruleset) == [
+        ("ip saddr 172.28.0.101 ct status dnat", "accept"),
+        ('ip saddr 172.28.0.101 oifname "wwan0"', "accept"),
+        _INTRA_ACCEPT,
+        _CATCH_ALL,
+    ]
 
 
-async def test_apply_without_bindings_clears_rules(isolation, fake_nft):
+async def test_apply_without_bindings_seals_subnet(isolation, fake_nft):
+    """Aucun binding : la chaîne filter contient exactement l'exception
+    intra-réseau et le catch-all drop."""
     await isolation.apply()
 
     ruleset = await fake_nft.get_ruleset()
-    assert all(not c.rules for c in _chains(ruleset).values())
+    chains = _chains(ruleset)
+    assert chains["proxy_mark"].rules == []
+    assert chains["proxy_nat"].rules == []
+    assert _filter_rules(ruleset) == [_INTRA_ACCEPT, _CATCH_ALL]
+
+
+async def test_no_leak_outside_dongle_interface(
+    isolation, dongle_repo, proxy_repo, fake_nft
+):
+    """Pas de fuite : un proxy ne sort que par l'interface de son dongle, et
+    le catch-all suit chaque accept positif."""
+    wwan0 = await _seed_dongle(dongle_repo, imei="123456789012345")
+    await _seed_proxy(proxy_repo, wwan0.id, ip="172.28.0.101", port=31201)
+    wwan1 = await _seed_dongle(
+        dongle_repo, imei="123456789012346", fwmark=8, interface="wwan1"
+    )
+    await _seed_proxy(proxy_repo, wwan1.id, ip="172.28.0.102", port=31202)
+
+    await isolation.apply()
+    ruleset = await fake_nft.get_ruleset()
+    filter_rules = _filter_rules(ruleset)
+
+    accept_wwan0 = ('ip saddr 172.28.0.101 oifname "wwan0"', "accept")
+    accept_wwan1 = ('ip saddr 172.28.0.102 oifname "wwan1"', "accept")
+    assert accept_wwan0 in filter_rules
+    assert accept_wwan1 in filter_rules
+    # Le catch-all suit (dernière position) : tout le reste du sous-réseau est
+    # refusé.
+    assert filter_rules[-1] == _CATCH_ALL
+    assert filter_rules.index(_CATCH_ALL) > filter_rules.index(accept_wwan1)
+    # Aucun accept pour une autre interface que celle du dongle du proxy.
+    for match, action in filter_rules:
+        if action == "accept" and "oifname" in match:
+            assert match in (accept_wwan0[0], accept_wwan1[0])
 
 
 class _ReentranceNft:

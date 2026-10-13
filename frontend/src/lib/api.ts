@@ -8,6 +8,7 @@ import {
   ResetBatchResponse,
   DiscoveredDongle,
   LocalConnection,
+  LocalConnectionView,
   AllowedHost,
   ProxyListenInterfaceSetting
 } from '../types/api';
@@ -143,6 +144,8 @@ export const api = {
   localConnections: {
     list: () => 
       request<LocalConnection[]>('/local-connections'),
+    get: (interfaceName: string) => 
+      request<LocalConnectionView>(`/local-connections/${encodeURIComponent(interfaceName)}`),
     create: (interfaceName: string, enabled?: boolean) => 
       request<ProxyWithPassword>('/local-connections', {
         method: 'POST',

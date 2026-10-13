@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from broxy4g.adapters.docker_compose import DockerComposeAdapter
+from broxy4g.domain.proxy import Proxy
 from broxy4g.repositories.proxy_repository import ProxyRepository
 from broxy4g.services.proxy_listen import ProxyListenService
 
@@ -60,6 +61,10 @@ class ProxyHealthService:
         proxy = await self._proxy_repo.get_by_dongle_id(dongle_id)
         if proxy is None:
             return ProxyHealth(UNKNOWN, "aucun proxy")
+        return await self.for_proxy(proxy)
+
+    async def for_proxy(self, proxy: Proxy) -> ProxyHealth:
+        """Santé d'un proxy persisté quel qu'il soit (dongle ou uplink local)."""
         if not proxy.enabled:
             return ProxyHealth(UNKNOWN, "proxy désactivé")
 

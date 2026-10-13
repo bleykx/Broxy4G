@@ -2,9 +2,18 @@
 
 Chaque proxy activé voit son trafic **sortant** (initié par le conteneur) marqué
 (fwmark du dongle associé) pour être dirigé vers la table de routage dédiée du
-dongle, masqué vers l'interface de ce dongle, et bloqué s'il tente de sortir par
-une autre interface. Aucune règle ne touche la route par défaut de la table
-`main`.
+dongle et masqué vers l'interface de ce dongle. Sa sortie est acceptée
+explicitement par l'interface de son dongle (quand celle-ci est connue) ; à
+défaut, tout trafic sortant du sous-réseau proxy est refusé par défaut par un
+drop scopé à `DOCKER_SUBNET` (deny-by-default scopé au sous-réseau proxy). Cela
+couvre le dongle hors ligne (interface inconnue), le proxy sans fwmark et les
+IP hors plage. Exception intra-réseau : le trafic à destination d'une IP DU
+sous-réseau proxy est accepté avant le catch-all, car avec `br_netfilter`
+(actif par défaut avec Docker) le trafic IPv4 entre deux conteneurs du même
+bridge traverse aussi le hook `forward` : ce n'est pas un uplink et ne doit
+pas être droppé. La chaîne du hook forward garde une politique `accept` : le
+forwarding du reste de l'hôte (autres réseaux Docker) n'est pas affecté.
+Aucune règle ne touche la route par défaut de la table `main`.
 
 Cas particulier des connexions ENTRANTES : quand un client du LAN ouvre une
 connexion vers le port publié d'un proxy, le conteneur répond avec sa propre IP
@@ -81,19 +90,29 @@ def _nat_rules(bindings: list[ProxyUplink]) -> list[NftablesRule]:
 def _filter_rules(bindings: list[ProxyUplink]) -> list[NftablesRule]:
     rules: list[NftablesRule] = []
     for b in bindings:
-        if not b.interface_name:
-            continue
-        # Autoriser explicitement le retour des connexions entrantes avant le drop :
-        # le conteneur doit pouvoir répondre à un client qui a joint son port publié,
-        # mais ne doit jamais initier de trafic vers une autre interface.
+        # Le retour des connexions entrantes est accepté en premier, même quand
+        # l'interface du dongle est inconnue (dongle hors ligne).
         rules.append(_reverse_rule(b))
-        rules.append(
-            NftablesRule(
-                0,
-                f'ip saddr {b.network_ip} oifname != "{b.interface_name}"',
-                "drop",
+        if b.interface_name:
+            # Autorisation positive : le proxy ne sort que par l'interface de
+            # son dongle.
+            rules.append(
+                NftablesRule(
+                    0,
+                    f'ip saddr {b.network_ip} oifname "{b.interface_name}"',
+                    "accept",
+                )
             )
-        )
+    # Exception intra-réseau (une seule fois, indépendante des bindings) : avec
+    # `br_netfilter`, le trafic entre deux conteneurs du même bridge traverse
+    # le hook forward ; le bridge n'est pas un uplink, il doit passer.
+    rules.append(
+        NftablesRule(0, f"ip saddr {DOCKER_SUBNET} ip daddr {DOCKER_SUBNET}", "accept")
+    )
+    # Deny-by-default scopé au sous-réseau proxy, indépendant des bindings :
+    # dongle hors ligne, proxy sans fwmark, IP hors plage → drop. Toute sortie
+    # vers une destination HORS sous-réseau reste refusée.
+    rules.append(NftablesRule(0, f"ip saddr {DOCKER_SUBNET}", "drop"))
     return rules
 
 

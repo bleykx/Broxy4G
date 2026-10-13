@@ -1,32 +1,23 @@
-import asyncio
 import logging
-from dataclasses import dataclass
 from uuid import UUID
 
-from broxy4g.adapters.connectivity import ConnectivityAdapter, PingResult
-from broxy4g.adapters.modem_manager import ModemInfo, ModemManagerAdapter, SignalQuality
+from broxy4g.adapters.connectivity import ConnectivityAdapter
+from broxy4g.adapters.modem_manager import ModemInfo, ModemManagerAdapter
 from broxy4g.adapters.net_interface import InterfaceAdapter
 from broxy4g.adapters.nftables import NftablesAdapter
 from broxy4g.adapters.routing import RoutingAdapter
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.repositories.dongle_repository import DongleRepository
+from broxy4g.services.dongle_diagnostics import DongleDiagnostics, DongleMetrics
 from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.routing_allocator import RoutingAllocator
-from broxy4g.services.uplink_probe import UplinkProbe
 from broxy4g.services.uplink_routes import UplinkRouteService
+from broxy4g.services.uplink_session import UplinkSession
 
 __all__ = ["ConnectionService", "DongleMetrics"]
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class DongleMetrics:
-    signal_quality: SignalQuality | None = None
-    ping: PingResult | None = None
-    public_ip: str | None = None
-    proxy_health: str | None = None
 
 
 class ConnectionService:
@@ -55,19 +46,25 @@ class ConnectionService:
         self.allocator = allocator
         self.uplink_routes = uplink_routes
         self.isolation = isolation
-        self.probe = UplinkProbe(iface, connectivity)
-        self._ip_wait_attempts = ip_wait_attempts
-        self._ip_wait_delay = ip_wait_delay
-        self._modem_wait_attempts = modem_wait_attempts
-        self._modem_wait_delay = modem_wait_delay
+        self.diagnostics = DongleDiagnostics(dongle_repo, modem, iface, connectivity, uplink_routes)
+        self.uplink_session = UplinkSession(
+            modem, iface, routing, uplink_routes,
+            ip_wait_attempts=ip_wait_attempts, ip_wait_delay=ip_wait_delay,
+            modem_wait_attempts=modem_wait_attempts, modem_wait_delay=modem_wait_delay,
+        )
 
     async def _apply_isolation(self) -> None:
         if self.isolation is not None:
             await self.isolation.apply()
 
-    async def _resolve_modem(self, dongle: Dongle) -> ModemInfo | None:
-        """Resolve the modem by identity to handle USB port changes."""
-        return await self.uplink_routes.resolve_modem(dongle)
+    async def _seal_failure(self, dongle: Dongle) -> None:
+        """Scelle l'échec : plancher (si slot) + isolation avant toute coupure.
+
+        Garde-fou ``route_table_id`` : chemin parcouru aussi AVANT ``_ensure_routing``.
+        """
+        if dongle.route_table_id:
+            await self.routing.add_barrier_route(dongle.route_table_id)
+        await self._apply_isolation()
 
     async def connect(self, dongle_id: UUID) -> Dongle:
         dongle = await self._load(dongle_id)
@@ -76,18 +73,12 @@ class ConnectionService:
         # Resolve modem to handle USB port changes
         modem = await self._resolve_modem(dongle)
         if modem is None:
-            return await self._fail_connect(
-                dongle, dongle_id, f"modem introuvable (IMEI={dongle.identity.imei})"
-            )
+            return await self._fail_connect(dongle, dongle_id, f"modem introuvable (IMEI={dongle.identity.imei})")
         if modem.interface_name is None:
-            return await self._fail_connect(
-                dongle, dongle_id,
-                "modem sans interface réseau (port net absent chez ModemManager)",
-            )
+            return await self._fail_connect(dongle, dongle_id, "modem sans interface réseau (port net absent chez ModemManager)")
 
-        # L'application ne renomme jamais un netdev (fragile avec ModemManager :
-        # le port net du modem est alors perdu). Le nom provient du netdev
-        # rattaché au modem, résolu par l'adaptateur (sysfs), et est persisté.
+        # Ne jamais renommer un netdev (fragile avec ModemManager : le port net
+        # du modem serait perdu). Le nom provient du netdev rattaché au modem (sysfs), persisté.
         iface_name = modem.interface_name
         dongle.interface_name = iface_name
 
@@ -113,13 +104,14 @@ class ConnectionService:
             # (Re)pose idempotente des routes d'uplink (fwmark, default, source) :
             # seule implémentation, partagée avec la reconciliation.
             await self.uplink_routes.apply_bearer(dongle, bearer, iface_name)
-            await self._wait_for_ip(iface_name, bearer.address if bearer else None)
+            await self.uplink_session.wait_for_ip(iface_name, bearer.address if bearer else None)
         except Exception as exc:
             logger.exception(
                 "Connect dongle %s échoué (modem=%s, interface=%s, apn=%s)",
                 dongle_id, modem.path, modem.interface_name, dongle.apn,
             )
             detail = f"{type(exc).__name__}: {exc}"
+            await self._seal_failure(dongle)
             dongle.fail(
                 f"échec connexion (apn={dongle.apn!r}, interface={modem.interface_name}, "
                 f"modem={modem.path}): {detail}"
@@ -133,41 +125,17 @@ class ConnectionService:
         await self._apply_isolation()
         return dongle
 
-    async def _fail_connect(
-        self, dongle: Dongle, dongle_id: UUID, message: str
-    ) -> Dongle:
-        """Échec métier de connexion : log ERROR lisible + dongle ERROR."""
+    async def _fail_connect(self, dongle: Dongle, dongle_id: UUID, message: str) -> Dongle:
+        """Échec métier : log ERROR lisible + dongle ERROR."""
         logger.error("Connect dongle %s échoué: %s", dongle_id, message)
+        await self._seal_failure(dongle)
         dongle.fail(message)
         await self.dongle_repo.save(dongle)
         return dongle
 
-    async def _teardown_uplink(self, dongle: Dongle) -> None:
-        """Déconnecte le bearer et nettoie interface + règles/routes.
-
-        Ne change pas l'état du dongle, ne sauvegarde pas et n'applique pas
-        l'isolation : ``disconnect`` (qui passe à OFFLINE) et ``reset_modem``
-        (qui reste en RESETTING) partagent ce teardown.
-        """
-        # Resolve modem to handle USB port changes
-        modem = await self._resolve_modem(dongle)
-        if modem and modem.interface_name:
-            await self.modem.disconnect(modem.path)
-            await self.iface.flush_ipv4(modem.interface_name)
-            await self.iface.set_down(modem.interface_name)
-        elif dongle.interface_name:
-            # Try to clean up even if modem is not found
-            await self.iface.flush_ipv4(dongle.interface_name)
-            await self.iface.set_down(dongle.interface_name)
-
-        if dongle.route_table_id and dongle.fwmark:
-            await self.routing.remove_rule(dongle.route_table_id, dongle.fwmark)
-            await self.routing.remove_source_rule(dongle.route_table_id)
-            await self.routing.remove_route(dongle.route_table_id, "default")
-
     async def disconnect(self, dongle_id: UUID) -> Dongle:
         dongle = await self._load(dongle_id)
-        await self._teardown_uplink(dongle)
+        await self.uplink_session.teardown(dongle)
         dongle.change_state(DongleState.OFFLINE)
         await self.dongle_repo.save(dongle)
         await self._apply_isolation()
@@ -176,14 +144,8 @@ class ConnectionService:
     async def reset_modem(self, dongle_id: UUID) -> Dongle:
         """Vrai reset modem USB (ré-énumération) puis reconnexion.
 
-        Seul le reset modem change l'IP publique : disconnect+connect et même
-        --delete-bearer ne suffisent pas. Le modem disparaît de ModemManager
-        (~15-40 s) puis réapparaît, parfois sous un nouveau chemin et une
-        interface renommée : il est retrouvé par identité (IMEI).
-
-        L'état reste RESETTING pendant tout le reset (teardown sans passer par
-        OFFLINE) : la réconciliation ignore donc le dongle tant que le verrou
-        de reset est tenu.
+        Seul le reset modem change l'IP publique ; l'état reste RESETTING pendant
+        tout le reset (teardown sans OFFLINE, verrou de reset tenu).
         """
         dongle = await self._load(dongle_id)
         modem = await self._resolve_modem(dongle)
@@ -193,23 +155,12 @@ class ConnectionService:
             return dongle
 
         try:
-            await self._teardown_uplink(dongle)
+            await self.uplink_session.teardown(dongle)
             await self.modem.reset_modem(modem.path)
-            # Phase 1 : attendre la disparition du modem (ré-énumération USB).
-            for _ in range(self._modem_wait_attempts):
-                if await self._resolve_modem(dongle) is None:
-                    break
-                await asyncio.sleep(self._modem_wait_delay)
-            # Phase 2 : attendre la réapparition avec une interface exploitable.
-            for _ in range(self._modem_wait_attempts):
-                candidate = await self._resolve_modem(dongle)
-                if candidate is not None and candidate.interface_name:
-                    break
-                await asyncio.sleep(self._modem_wait_delay)
-            else:
-                raise RuntimeError("modem non réapparu après reset")
+            await self.uplink_session.wait_reenumeration(dongle)
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"
+            await self._seal_failure(dongle)
             dongle.fail(f"échec reset modem: {detail}")
             await self.dongle_repo.save(dongle)
             return dongle
@@ -217,36 +168,21 @@ class ConnectionService:
         return await self.connect(dongle_id)
 
     async def get_metrics(self, dongle_id: UUID) -> DongleMetrics:
-        dongle = await self._load(dongle_id)
-
-        signal = None
-        # Resolve modem to handle USB port changes
-        modem = await self._resolve_modem(dongle)
-        if modem:
-            signal = await self.modem.get_signal(modem.path)
-
-        ping = await self.probe.ping(dongle.interface_name)
-        public_ip = await self.probe.public_ip(dongle.interface_name)
-
-        return DongleMetrics(signal_quality=signal, ping=ping, public_ip=public_ip)
+        return await self.diagnostics.get_metrics(dongle_id)
 
     async def get_public_ip(self, dongle_id: UUID) -> str | None:
-        dongle = await self._load(dongle_id)
-        return await self.probe.public_ip(dongle.interface_name)
+        return await self.diagnostics.get_public_ip(dongle_id)
 
     async def get_session_id(self, dongle_id: UUID) -> str | None:
-        """Identifiant de la session data courante du dongle (None si inconnue)."""
-        dongle = await self._load(dongle_id)
-        modem = await self._resolve_modem(dongle)
-        if not modem:
-            return None
-        return await self.modem.get_session_id(modem.path)
+        return await self.diagnostics.get_session_id(dongle_id)
+
+    async def _resolve_modem(self, dongle: Dongle) -> ModemInfo | None:
+        return await self.uplink_routes.resolve_modem(dongle)
 
     async def _ensure_routing(self, dongle: Dongle) -> None:
-        """Attribue (une fois) une table de routage et une marque firewall au dongle.
+        """Attribue (une fois) table de routage + fwmark au dongle.
 
-        L'allocation est déléguée à l'allocateur partagé (dongles + proxies),
-        jamais à une vue partielle : c'est elle qui garantit l'unicité du slot.
+        L'allocateur partagé (dongles + proxies) garantit l'unicité du slot.
         """
         if dongle.route_table_id and dongle.fwmark:
             return
@@ -254,21 +190,8 @@ class ConnectionService:
         dongle.route_table_id = table_id
         dongle.fwmark = fwmark
         await self.dongle_repo.save(dongle)
-
-    async def _wait_for_ip(self, interface: str, expected: str | None = None) -> str:
-        """Poll iface.get_ip until the expected source IP appears or attempts run out.
-
-        ``expected`` (l'IP du bearer) est exigée : une adresse résiduelle, même
-        présente en 1re position, ne doit pas valider la connexion.
-        """
-        for _ in range(self._ip_wait_attempts):
-            ip = await self.iface.get_ip(interface)
-            if ip and (expected is None or ip == expected):
-                return ip
-            await asyncio.sleep(self._ip_wait_delay)
-        raise RuntimeError(
-            f"no IPv4 on {interface} after {self._ip_wait_attempts} attempts",
-        )
+        # Plancher anti-fuite dès l'allocation (default unreachable).
+        await self.routing.add_barrier_route(table_id)
 
     async def _load(self, dongle_id: UUID) -> Dongle:
         dongle = await self.dongle_repo.get_by_id(dongle_id)

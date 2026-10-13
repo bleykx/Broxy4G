@@ -48,7 +48,10 @@ async def test_disconnect_transitions_to_offline(connection_service, enrollment_
 
 
 @pytest.mark.asyncio
-async def test_disconnect_removes_routing_rules(connection_service, enrollment_service, fake_routing):
+async def test_disconnect_keeps_fwmark_and_poses_barrier(
+    connection_service, enrollment_service, fake_routing
+):
+    """Le teardown CONSERVE la règle fwmark, pose le plancher, ne supprime aucune route."""
     identity = IdentityMaterial(imei="123456789012345")
     dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
     dongle.interface_name = "wwan0"
@@ -56,13 +59,66 @@ async def test_disconnect_removes_routing_rules(connection_service, enrollment_s
     dongle.fwmark = 1
     await enrollment_service.dongle_repo.save(dongle)
 
+    # État initial : règle fwmark + route default réelle.
     await connection_service.routing.add_rule(10001, 1)
-    await connection_service.routing.add_route(10001, "default", None, "wwan0")
+    await connection_service.routing.add_route(10001, "default", "10.159.25.49", "wwan0")
 
     await connection_service.disconnect(dongle.id)
 
-    assert await fake_routing.list_rules() == []
-    assert await fake_routing.list_routes(10001) == []
+    # La règle fwmark est CONSERVÉE (aucun remove_rule).
+    rules = await fake_routing.list_rules()
+    assert any(r.table_id == 10001 and r.fwmark == 1 for r in rules)
+    # La table garde UN plancher default unreachable (aucun remove_route).
+    routes = await fake_routing.list_routes(10001)
+    assert len(routes) == 1
+    assert routes[0].dest == "default"
+    assert routes[0].type == "unreachable"
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_poses_barrier_and_isolation(
+    connection_service, enrollment_service, fake_modem, fake_routing
+):
+    """Échec de connect : plancher posé, isolation réappliquée, dongle en ERROR."""
+    identity = IdentityMaterial(imei="123456789012345")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
+    dongle.interface_name = "wwan0"
+    dongle.route_table_id = 10001
+    dongle.fwmark = 1
+    add_modem(fake_modem)
+
+    with (
+        patch.object(
+            fake_modem, "connect", new=AsyncMock(side_effect=RuntimeError("boom"))
+        ),
+        patch.object(connection_service.isolation, "apply", new=AsyncMock()) as mock_apply,
+    ):
+        result = await connection_service.connect(dongle.id)
+
+    assert result.state == DongleState.ERROR
+    mock_apply.assert_awaited_once()
+    routes = await fake_routing.list_routes(10001)
+    assert any(r.dest == "default" and r.type == "unreachable" for r in routes)
+
+
+@pytest.mark.asyncio
+async def test_ensure_routing_poses_barrier_on_allocation(
+    connection_service, enrollment_service, fake_modem
+):
+    """1re connexion : le plancher est posé dès l'allocation du slot."""
+    identity = IdentityMaterial(imei="123456789012345")
+    dongle = (await enrollment_service.enroll(identity, "Test", "test.apn")).dongle
+    # Pas de slot préalloué : _ensure_routing en alloue un.
+    add_modem(fake_modem)
+
+    with patch.object(
+        connection_service.routing, "add_barrier_route", new=AsyncMock()
+    ) as mock_barrier:
+        result = await connection_service.connect(dongle.id)
+
+    assert result.state == DongleState.ONLINE
+    assert result.route_table_id is not None
+    mock_barrier.assert_awaited_once_with(result.route_table_id)
 
 
 @pytest.mark.asyncio

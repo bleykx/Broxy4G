@@ -5,7 +5,7 @@ import pytest
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
-from broxy4g.domain.proxy import ProxySource, ProxyState
+from broxy4g.domain.proxy import Proxy, ProxySource, ProxyState
 from broxy4g.domain.proxy_isolation import ISOLATION_TABLE
 
 
@@ -167,3 +167,30 @@ async def test_stop_clears_network_isolation(proxy_service, dongle_repo, fake_nf
     provisioned = await proxy_service.create(dongle_id, enabled=True)
     await proxy_service.stop(provisioned.proxy.id)
     assert await _mark_rules(fake_nft) == []
+
+
+@pytest.mark.asyncio
+async def test_release_pinning_poses_barrier(proxy_service, fake_routing):
+    """_release_pinning retire la règle fwmark mais pose un plancher (pas de remove_route)."""
+    proxy = Proxy(
+        dongle_id=None,
+        container_name="local-test",
+        listen_port=31201,
+        source_type=ProxySource.LOCAL,
+        route_table_id=20001,
+        fwmark=9,
+    )
+    # État initial : règle fwmark + route default réelle.
+    await fake_routing.add_rule(20001, 9)
+    await fake_routing.add_route(20001, "default", "192.168.1.1", "eth0")
+
+    await proxy_service._release_pinning(proxy)
+
+    # La règle fwmark est retirée...
+    rules = await fake_routing.list_rules()
+    assert not any(r.table_id == 20001 and r.fwmark == 9 for r in rules)
+    # ...mais la table garde un plancher default unreachable (aucun remove_route).
+    routes = await fake_routing.list_routes(20001)
+    assert len(routes) == 1
+    assert routes[0].dest == "default"
+    assert routes[0].type == "unreachable"

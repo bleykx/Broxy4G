@@ -95,12 +95,25 @@ export interface AllowedHost {
 
 export type LocalInterfaceKind = 'ethernet' | 'wifi' | 'other';
 
+export type LocalLinkState = 'up' | 'down' | 'unknown';
+
 export interface LocalConnection {
   interface_name: string;
   ip: string | null;
   kind: LocalInterfaceKind;
   enrolled: boolean;
   proxy_id: string | null;
+  gateway: string | null;
+  link_state: LocalLinkState;
+}
+
+export type LocalProxyHealth = 'healthy' | 'unhealthy' | 'unknown';
+
+export interface LocalConnectionView extends LocalConnection {
+  dns: string[] | null;
+  proxy: ProxyDetail | null;
+  proxy_health: LocalProxyHealth | null;
+  proxy_health_reason: string | null;
 }
 
 export interface ProxyListenInterfaceSetting {

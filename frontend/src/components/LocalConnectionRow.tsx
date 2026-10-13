@@ -1,10 +1,14 @@
 import React from 'react';
-import { LocalConnection, LocalInterfaceKind } from '../types/api';
+import { Link } from 'react-router-dom';
+import { LocalConnection, LocalInterfaceKind, ProxyDetail } from '../types/api';
+import { StateBadge } from './StateBadge';
+import { LinkStateBadge } from '../features/uplinks/LinkStateBadge';
 
 interface LocalConnectionRowProps {
   connection: LocalConnection;
   busy: boolean;
   disabled: boolean;
+  proxy?: ProxyDetail | null;
   onEnroll?: () => void;
   onUnenroll?: () => void;
 }
@@ -19,22 +23,25 @@ export const LocalConnectionRow: React.FC<LocalConnectionRowProps> = ({
   connection,
   busy,
   disabled,
+  proxy = null,
   onEnroll,
   onUnenroll,
 }) => {
-  const { interface_name, ip, kind, enrolled } = connection;
+  const { interface_name, ip, kind, enrolled, gateway, link_state } = connection;
+  const detailsTo = `/local/${encodeURIComponent(interface_name)}`;
 
   return (
     <article className="card dongle-card">
       <div className="dongle-card-header">
         <div className="dongle-card-heading">
-          <span className="dongle-card-title mono">{interface_name}</span>
+          <Link to={detailsTo} className="dongle-card-title mono">{interface_name}</Link>
           <span
             className="badge"
             style={{ backgroundColor: KIND_COLORS[kind], color: 'white' }}
           >
             {kind}
           </span>
+          <LinkStateBadge state={link_state} />
           {enrolled && (
             <span
               className="badge"
@@ -74,6 +81,27 @@ export const LocalConnectionRow: React.FC<LocalConnectionRowProps> = ({
           <span className="metric-label">IP</span>
           <span className="mono">{ip ?? '—'}</span>
         </div>
+        <div className="metric-row">
+          <span className="metric-label">Gateway</span>
+          <span className="mono">{gateway ?? '—'}</span>
+        </div>
+        <div className="metric-row">
+          <span className="metric-label">Proxy</span>
+          {proxy ? (
+            <span className="proxy-row-value">
+              <StateBadge state={proxy.state} />
+              <span className="mono">:{proxy.listen_port}</span>
+            </span>
+          ) : (
+            <span className="mono">—</span>
+          )}
+        </div>
+      </div>
+
+      <div className="dongle-card-footer">
+        <Link to={detailsTo} className="details-link">
+          Details →
+        </Link>
       </div>
 
       {busy && <div className="card-status">Enrolling…</div>}

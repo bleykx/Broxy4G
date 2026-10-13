@@ -48,6 +48,47 @@ async def test_disabled_proxy_is_unknown(proxy_repo, fake_docker_compose, fake_l
     assert health.reason == "proxy désactivé"
 
 
+async def test_for_proxy_disabled_is_unknown(proxy_repo, fake_docker_compose, fake_local_uplink, settings_repo):
+    proxy = await _make_proxy(proxy_repo, enabled=False)
+    service = ProxyHealthService(proxy_repo, fake_docker_compose, _listen_service(settings_repo, fake_local_uplink))
+    health = await service.for_proxy(proxy)
+    assert health.status == UNKNOWN
+    assert health.reason == "proxy désactivé"
+
+
+async def test_for_proxy_stopped_container_is_unhealthy(proxy_repo, fake_docker_compose, fake_local_uplink, settings_repo):
+    proxy = await _make_proxy(proxy_repo)
+    fake_docker_compose.set_state(CONTAINER, "exited")
+    service = ProxyHealthService(proxy_repo, fake_docker_compose, _listen_service(settings_repo, fake_local_uplink))
+    health = await service.for_proxy(proxy)
+    assert health.status == UNHEALTHY
+    assert "conteneur" in health.reason
+
+
+async def test_for_proxy_healthy_when_running_and_reachable(
+    proxy_repo, fake_docker_compose, fake_local_uplink, settings_repo
+):
+    # Cas uplink local : la santé est calculée sur le proxy persisté, sans dongle.
+    proxy = await _make_proxy(proxy_repo)
+    fake_docker_compose.set_state(CONTAINER, "running")
+    listen = _listen_service(settings_repo, fake_local_uplink)
+
+    async def _reachable(host, port):
+        return True
+
+    health = await ProxyHealthService(proxy_repo, fake_docker_compose, listen, probe=_reachable).for_proxy(proxy)
+    assert health.status == HEALTHY
+    assert health.reason is None
+
+
+async def test_for_dongle_delegates_to_for_proxy(proxy_repo, fake_docker_compose, fake_local_uplink, settings_repo):
+    proxy = await _make_proxy(proxy_repo)
+    service = ProxyHealthService(proxy_repo, fake_docker_compose, _listen_service(settings_repo, fake_local_uplink))
+    via_dongle = await service.for_dongle(DONGLE_ID)
+    via_proxy = await service.for_proxy(proxy)
+    assert via_dongle == via_proxy
+
+
 async def test_stopped_container_is_unhealthy(proxy_repo, fake_docker_compose, fake_local_uplink, settings_repo):
     await _make_proxy(proxy_repo)
     fake_docker_compose.set_state(CONTAINER, "exited")
