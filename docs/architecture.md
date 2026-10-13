@@ -121,6 +121,15 @@ exécuté sans passer par OFFLINE, si bien que la fenêtre modem-absent ne casse
 pas l'interlock ci-dessous et la réconciliation ne tente jamais de `connect`
 intercalé. En échec, RESETTING ──► ERROR (`dongle.fail`).
 
+Pendant le reset, le proxy du dongle est **mis en pause** puis recréé à la
+reconnexion : le conteneur 3proxy est épinglé au dongle (table de routage dédiée
++ marque firewall), donc après un reset modem l'ancien bearer et ses routes
+n'existent plus et le conteneur doit être reconstruit pour sortir par la nouvelle
+session. Son **état désiré** (`enabled`) est conservé d'un bout à l'autre : un
+proxy désactivé par l'opérateur le reste. Un reset en échec ou expiré laisse le
+conteneur arrêté mais `enabled` à vrai — la réconciliation le restaure dès que
+l'uplink redevient utilisable. Aucun proxy n'est démarré sur un uplink mort.
+
 ONLINE    ──(reset)───► RESETTING
 DEGRADED  ──(reset)───► RESETTING
 OFFLINE   ──(reset)───► RESETTING

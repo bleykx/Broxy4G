@@ -66,6 +66,24 @@ class ProxyLifecycleService:
         await self._apply_isolation()
         return proxy
 
+    async def pause(self, proxy_id: UUID) -> Proxy:
+        """Arrête le conteneur SANS changer l'état désiré persisté.
+
+        ``enabled`` est conservé : la réconciliation restaure le proxy une
+        fois l'uplink de nouveau utilisable (cas d'un reset de dongle)."""
+        proxy = await self._load(proxy_id)
+        await self.provisioning.down(proxy)
+        await self._apply_isolation()
+        return proxy
+
+    async def resume(self, proxy_id: UUID) -> Proxy:
+        """Reprend un proxy mis en pause : recrée le conteneur et réactive
+        l'état désiré (``enabled = True``)."""
+        proxy = await self._load(proxy_id)
+        await self.provisioning.up(proxy)
+        await self._apply_isolation()
+        return proxy
+
     async def restart(self, proxy_id: UUID) -> Proxy:
         proxy = await self._load(proxy_id)
         await self.provisioning.down(proxy)

@@ -48,6 +48,9 @@ class ResetService:
         try:
             return await asyncio.wait_for(self._run_reset(dongle_id), timeout=self.reset_timeout)
         except TimeoutError:
+            # Timeout : le conteneur proxy reste arrêté mais ``enabled`` est
+            # conservé — la réconciliation le restaurera (pas de proxy sans
+            # uplink fiable).
             return ResetOutcome("ERROR", f"reset expiré après {self.reset_timeout:g}s")
         finally:
             self.lock.release(str(dongle_id), token)
@@ -78,15 +81,21 @@ class ResetService:
 
         try:
             existing_proxy = await self.proxy_repo.get_by_dongle_id(dongle_id)
+            # Capture de l'état désiré AVANT la pause : un proxy désactivé par
+            # l'opérateur doit rester désactivé après le reset.
+            was_enabled = bool(existing_proxy.enabled) if existing_proxy else False
             if existing_proxy:
-                await self.proxy.stop(existing_proxy.id)
+                await self.proxy.pause(existing_proxy.id)
 
             connected = await self.connection.reset_modem(dongle_id)
             if connected.state == DongleState.ERROR:
+                # Échec : le conteneur reste arrêté mais ``enabled`` est
+                # conservé — la réconciliation le restaurera dès que le dongle
+                # aura de nouveau un uplink utilisable.
                 return ResetOutcome("ERROR", connected.last_error or "échec reconnexion après reset")
 
-            if existing_proxy and existing_proxy.enabled:
-                await self.proxy.start(existing_proxy.id)
+            if was_enabled:
+                await self.proxy.resume(existing_proxy.id)
 
             metrics = await self.connection.get_metrics(dongle_id)
             if self.metrics_snapshot is not None:
@@ -102,6 +111,9 @@ class ResetService:
             )
             return ResetOutcome("DONE")
         except Exception as exc:
+            # Échec : pas de reprise du conteneur (uplink non fiable) ; il
+            # reste arrêté avec ``enabled`` conservé, la réconciliation le
+            # restaurera plus tard.
             message = f"{type(exc).__name__}: {exc}"
             try:
                 d = await self.dongle_repo.get_by_id(dongle_id)

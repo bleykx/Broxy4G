@@ -8,6 +8,7 @@ from broxy4g.adapters.modem_manager import BearerIpConfig, ModemInfo
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
+from broxy4g.domain.proxy import ProxyState
 from broxy4g.services.reset import ResetService
 
 
@@ -57,6 +58,129 @@ async def test_reset_returns_done_on_success(
 
     result = await reset_service.reset(dongle.id)
     assert result.status == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_reset_success_recycles_enabled_proxy_container(
+    reset_service, enrollment_service, proxy_repo, fake_modem, fake_docker_compose
+):
+    """Proxy activé avant le reset : le reset met le conteneur en pause puis le
+    recrée (down puis up) ; l'état désiré ``enabled`` est conservé."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+    proxy = await proxy_repo.get_by_dongle_id(dongle.id)
+    assert proxy is not None and proxy.enabled is True
+
+    calls_before = len(fake_docker_compose.calls)
+    result = await reset_service.reset(dongle.id)
+
+    assert result.status == "DONE"
+    stored = await proxy_repo.get_by_id(proxy.id)
+    assert stored.enabled is True
+    assert stored.state == ProxyState.RUNNING
+    actions = [
+        action for (name, action) in fake_docker_compose.calls[calls_before:]
+        if name == proxy.container_name
+    ]
+    # pause (down) puis recréation du conteneur (up)
+    assert actions == ["down", "up"]
+
+
+@pytest.mark.asyncio
+async def test_reset_failure_keeps_enabled_proxy_stopped(
+    reset_service, enrollment_service, connection_service, proxy_repo,
+    fake_modem, fake_docker_compose,
+):
+    """Échec de reconnexion : l'état désiré du proxy reste ``enabled = True``,
+    mais le reset ne relance PAS son conteneur (la réconciliation s'en chargera
+    dès que le dongle sera de nouveau utilisable)."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+    proxy = await proxy_repo.get_by_dongle_id(dongle.id)
+    assert proxy is not None and proxy.enabled is True
+
+    async def fake_connect(dongle_id):
+        d = await enrollment_service.dongle_repo.get_by_id(dongle_id)
+        d.state = DongleState.ONLINE  # garantit que la transition vers ERROR est autorisée
+        d.fail("connect KO")
+        await enrollment_service.dongle_repo.save(d)
+        return d
+
+    calls_before = len(fake_docker_compose.calls)
+    with patch.object(connection_service, "connect", new=AsyncMock(side_effect=fake_connect)):
+        result = await reset_service.reset(dongle.id)
+
+    assert result.status == "ERROR"
+    stored = await proxy_repo.get_by_id(proxy.id)
+    assert stored.enabled is True
+    assert stored.state == ProxyState.STOPPED
+    actions = [
+        action for (name, action) in fake_docker_compose.calls[calls_before:]
+        if name == proxy.container_name
+    ]
+    # seul le down de la pause : aucun up après l'échec
+    assert actions == ["down"]
+
+
+@pytest.mark.asyncio
+async def test_reset_timeout_keeps_proxy_enabled(
+    enrollment_service, connection_service, dongle_repo, proxy_repo, proxy_service,
+    fake_modem, fake_reset_lock,
+):
+    """Timeout du reset : ERROR « reset expiré », mais l'état désiré du proxy
+    reste ``enabled = True`` (la réconciliation le restaurera)."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+    proxy = await proxy_repo.get_by_dongle_id(dongle.id)
+    assert proxy is not None and proxy.enabled is True
+
+    async def blocking_connect(dongle_id):
+        await asyncio.sleep(3600)  # ne rend jamais la main
+
+    svc = ResetService(
+        dongle_repo, proxy_repo, connection_service, proxy_service, fake_reset_lock,
+        reset_timeout=0.01,
+    )
+    with patch.object(connection_service, "connect", new=AsyncMock(side_effect=blocking_connect)):
+        result = await svc.reset(dongle.id)
+
+    assert result.status == "ERROR"
+    assert "reset expiré" in (result.message or "")
+    stored = await proxy_repo.get_by_id(proxy.id)
+    assert stored.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_reset_never_starts_proxy_disabled_before_reset(
+    reset_service, enrollment_service, proxy_service, proxy_repo,
+    fake_modem, fake_docker_compose,
+):
+    """Proxy désactivé par l'opérateur avant le reset : il reste
+    ``enabled = False`` après le reset et son conteneur n'est jamais lancé."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+    proxy = await proxy_service.get_by_dongle_id(dongle.id)
+    assert proxy is not None
+    await proxy_service.stop(proxy.id)  # état désiré : désactivé
+    assert (await proxy_repo.get_by_id(proxy.id)).enabled is False
+
+    calls_before = len(fake_docker_compose.calls)
+    result = await reset_service.reset(dongle.id)
+
+    assert result.status == "DONE"
+    stored = await proxy_repo.get_by_id(proxy.id)
+    assert stored.enabled is False
+    assert stored.state == ProxyState.STOPPED
+    actions = [
+        action for (name, action) in fake_docker_compose.calls[calls_before:]
+        if name == proxy.container_name
+    ]
+    # jamais de up : le conteneur n'est pas (re)lancé
+    assert "up" not in actions
 
 
 @pytest.mark.asyncio

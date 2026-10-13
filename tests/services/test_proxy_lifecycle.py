@@ -66,6 +66,31 @@ async def test_stop_transitions_to_stopped(proxy_service, dongle_repo):
 
 
 @pytest.mark.asyncio
+async def test_pause_keeps_enabled_state(proxy_service, dongle_repo, proxy_repo):
+    """pause arrête le conteneur SANS changer l'état désiré (contrairement à stop)."""
+    dongle_id = await _seed_dongle(dongle_repo)
+    provisioned = await proxy_service.create(dongle_id, enabled=True)
+    result = await proxy_service.pause(provisioned.proxy.id)
+    stored = await proxy_repo.get_by_id(provisioned.proxy.id)
+    assert result.state == ProxyState.STOPPED
+    assert result.enabled is True
+    assert stored.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_resume_restores_running_and_enabled(proxy_service, dongle_repo, proxy_repo):
+    """resume recrée le conteneur : le proxy redevient RUNNING et enabled=True."""
+    dongle_id = await _seed_dongle(dongle_repo)
+    provisioned = await proxy_service.create(dongle_id, enabled=True)
+    await proxy_service.pause(provisioned.proxy.id)
+    result = await proxy_service.resume(provisioned.proxy.id)
+    stored = await proxy_repo.get_by_id(provisioned.proxy.id)
+    assert result.state == ProxyState.RUNNING
+    assert result.enabled is True
+    assert stored.enabled is True
+
+
+@pytest.mark.asyncio
 async def test_rotate_credentials_changes_user(proxy_service, dongle_repo):
     dongle_id = await _seed_dongle(dongle_repo)
     provisioned = await proxy_service.create(dongle_id, enabled=False)

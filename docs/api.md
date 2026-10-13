@@ -322,6 +322,15 @@ back within the bounded wait, the reset returns `ERROR`. On success, the
 per-dongle metrics cache used by the dongle list (public IP, signal quality)
 is refreshed immediately, so the dashboard no longer shows a stale IP.
 
+**Proxy.** The dongle's proxy is paused for the duration of the reset and then
+recreated. The 3proxy container is pinned to its dongle (dedicated routing table
++ firewall mark), so after a modem reset the previous bearer and routes are gone
+and the container must be rebuilt to egress through the new session. The proxy's
+*desired* state is preserved across the reset: a proxy the operator had disabled
+stays disabled. If the reset fails or times out, the container is left stopped
+but `enabled` stays `true`, so reconciliation restores the proxy once the dongle
+has a usable uplink again — a proxy is never started on a dead uplink.
+
 **CGNAT caveat.** An identical public IP before and after the reset does **not**
 imply a failure: behind a carrier-grade NAT the operator may assign the same
 public IP to two consecutive sessions. The USB modem reset guarantees a fresh
