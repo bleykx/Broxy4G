@@ -1,5 +1,8 @@
 """Route GET de reset de dongle (outils externes GET-only type Ankabot)."""
 
+import logging
+from uuid import uuid4
+
 from broxy4g.adapters.modem_manager import BearerIpConfig, ModemInfo
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
@@ -32,7 +35,18 @@ class TestResetGet:
         response = await client.get(f"/api/v1/dongles/{dongle.id}/reset", headers=auth_headers)
 
         assert response.status_code == 200
-        assert response.json()["status"] == "DONE"
+        assert response.text == "DONE"
+        assert response.headers["content-type"].startswith("text/plain")
+
+    async def test_get_reset_unknown_dongle_returns_error(self, client, auth_headers):
+        """Dongle inexistant : corps brut ``ERROR`` (HTTP 200), pas de JSON."""
+        unknown_id = uuid4()
+
+        response = await client.get(f"/api/v1/dongles/{unknown_id}/reset", headers=auth_headers)
+
+        assert response.status_code == 200
+        assert response.text == "ERROR"
+        assert not response.text.lstrip().startswith(("{", "["))
 
     async def test_get_reset_requires_auth(self, client, app):
         dongle = await _enroll_online_via_app(app, "123456789012345", "wwan0", 10001, 1)
@@ -57,6 +71,18 @@ class TestResetGet:
         response = await client.get(f"/api/v1/dongles/{dongle.id}/reset", headers=auth_headers)
 
         assert response.status_code == 200
-        body = response.json()
-        assert body["status"] == "PENDING"
-        assert body["message"] == "reset déjà en cours"
+        assert response.text == "PENDING"
+
+    async def test_get_reset_logs_outcome_detail(self, client, app, auth_headers, caplog):
+        """Le corps ne portant que le statut, la raison reste dans les logs."""
+        dongle = await _enroll_online_via_app(app, "123456789012345", "wwan0", 10001, 1)
+        app.state.reset_lock.acquire(str(dongle.id))  # un reset tourne déjà
+
+        with caplog.at_level(logging.INFO, logger="broxy4g.api.routers.dongle_reset"):
+            response = await client.get(f"/api/v1/dongles/{dongle.id}/reset", headers=auth_headers)
+
+        assert response.text == "PENDING"
+        assert any(
+            "PENDING" in r.getMessage() and "reset déjà en cours" in r.getMessage()
+            for r in caplog.records
+        ), "la raison du PENDING doit être journalisée puisque le corps ne porte que le statut"

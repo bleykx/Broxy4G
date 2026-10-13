@@ -301,15 +301,19 @@ the per-dongle lock is always released on completion, timeout or cancellation.
   `UNENROLLED` or `CONFIGURING` (the reset needs an already-enrolled dongle).
   The message has the exact form `reset impossible dans l'état <STATE>`.
 
-**GET variant.** The same handler is exposed as `GET /api/v1/dongles/{id}/reset`
-for external GET-only tools (Ankabot) that can pass only a URL — combine it
-with the opt-in query string auth to trigger a reset with a single link.
+**GET variant.** `GET /api/v1/dongles/{id}/reset` is exposed for external
+GET-only tools (Ankabot) that can pass only a URL — combine it with the
+opt-in query string auth to trigger a reset with a single link.
 Behaviour is identical to the POST variant: same `ResetService`, same
 per-dongle lock (a concurrent reset returns `PENDING`), same idempotence and
-`DONE` / `ERROR` / `PENDING` statuses. The GET response carries
-`Cache-Control: no-store` and `Pragma: no-cache` so the outcome of an
-administrative action is never cached. The trigger is logged (with the HTTP
-method used, without any secret).
+`DONE` / `ERROR` / `PENDING` statuses. Unlike the POST, which returns the
+JSON `{"status": ..., "message": ...}` payload, the GET variant returns the
+**raw business status** as a `text/plain` body: exactly `DONE`, `ERROR` or
+`PENDING` — the exact body, with no trailing newline and HTTP `200`. This is
+what a GET-only tool compares against (Ankabot expects the body `DONE`).
+The GET response carries `Cache-Control: no-store` and `Pragma: no-cache` so
+the outcome of an administrative action is never cached. The trigger is
+logged (with the HTTP method used, without any secret).
 
 **Modem reset.** The reset performs a real USB modem reset
 (`mmcli -m <path> --reset`) after tearing down the bearer: this is the only
