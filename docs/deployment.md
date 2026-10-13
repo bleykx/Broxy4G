@@ -294,6 +294,7 @@ docker buildx build --platform linux/arm64 -t broxy4g:local .
 | BROXY4G_PROXY_HOST_IPS | Comma-separated host IPs to route through proxies | none |
 | BROXY4G_HOST | Host to bind to | 0.0.0.0 |
 | BROXY4G_PORT | Port to listen on | 8080 |
+| BROXY4G_ALLOW_QUERY_AUTH | Opt-in: allow API auth via query string (`?user=…&password=…`) for GET-only external tools; accepted values `1`/`true`/`yes`/`on` (case-insensitive) | false (fail-closed) |
 
 ## Security Notes
 

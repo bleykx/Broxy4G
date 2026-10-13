@@ -18,6 +18,7 @@ from broxy4g.adapters.nftables_real import RealNftables
 from broxy4g.adapters.routing_real import RealRouting
 from broxy4g.adapters.shell_real import RealShell
 from broxy4g.adapters.usb_device import RealUsbDevice
+from broxy4g.api.access_log import build_access_log_config
 from broxy4g.api.app import create_app
 from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.database import create_engine, create_session_factory, init_db
@@ -174,7 +175,15 @@ async def main():
     stop_event = asyncio.Event()
     worker_task = asyncio.create_task(run_workers(app, stop_event, work_dir))
 
-    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
+    # L'access log uvicorn passe par un formateur qui masque les secrets de
+    # la query string (auth par ?user=…&password=…), cf. api/access_log.py.
+    config = uvicorn.Config(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+        log_config=build_access_log_config(),
+    )
     server = uvicorn.Server(config)
     server_task = asyncio.create_task(server.serve())
 

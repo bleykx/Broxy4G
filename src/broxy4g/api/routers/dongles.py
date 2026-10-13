@@ -8,7 +8,6 @@ from broxy4g.api.deps import (
     get_enrollment_service,
     get_metrics_snapshot,
     get_proxy_health_service,
-    get_reset_service,
     require_auth,
 )
 from broxy4g.api.schemas.dongle import (
@@ -25,12 +24,6 @@ from broxy4g.api.schemas.dongle_enrollment import (
     DongleEnrollmentResponse,
     EnrollmentProxyCredentials,
 )
-from broxy4g.api.schemas.reset import (
-    ResetBatchItem,
-    ResetBatchResult,
-    ResetRequest,
-    ResetResult,
-)
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.services.connection import ConnectionService
@@ -39,7 +32,6 @@ from broxy4g.services.discovery import DiscoveryService
 from broxy4g.services.enrollment import EnrollmentResult, EnrollmentService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot, SummaryMetrics
 from broxy4g.services.proxy_health import ProxyHealth, ProxyHealthService
-from broxy4g.services.reset import ResetService
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 
@@ -139,16 +131,6 @@ async def enroll_dongle(
     return _to_enrollment_response(result)
 
 
-@router.post("/dongles/reset", response_model=ResetBatchResult)
-async def reset_dongles(
-    body: ResetRequest, svc: ResetService = Depends(get_reset_service)
-):
-    results = await svc.reset_many(body.ids)
-    return ResetBatchResult(
-        results=[ResetBatchItem(dongle_id=did, status=o.status, message=o.message) for did, o in results]
-    )
-
-
 @router.get("/dongles/{dongle_id}", response_model=DongleDetail)
 async def get_dongle(
     dongle_id: UUID,
@@ -206,11 +188,3 @@ async def disconnect_dongle(
         await conn.disconnect(dongle_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="Dongle not found")
-
-
-@router.post("/dongles/{dongle_id}/reset", response_model=ResetResult)
-async def reset_dongle(
-    dongle_id: UUID, svc: ResetService = Depends(get_reset_service)
-):
-    outcome = await svc.reset(dongle_id)
-    return ResetResult(status=outcome.status, message=outcome.message)

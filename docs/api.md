@@ -10,6 +10,34 @@ Authorization: Basic <base64(user:pass)>
 
 The credentials are configured via the `BROXY4G_API_USER` (default: "admin") and `BROXY4G_API_PASSWORD` environment variables.
 
+### Query string auth (opt-in)
+
+For external tools that can only pass a single URL (GET-only, e.g. Ankabot),
+credentials may be sent in the query string:
+
+```
+GET /api/v1/dongles?user=<user>&password=<password>
+```
+
+This is **disabled by default (fail-closed)** and only read when the
+`BROXY4G_ALLOW_QUERY_AUTH` environment variable is set to a truthy value
+(`1`, `true`, `yes` or `on`, case-insensitive). Rules:
+
+- The `Authorization` header always takes precedence: when it is present
+  (even malformed), the query string is never consulted and a `401` is
+  returned if the header does not carry valid credentials.
+- Both `user` and `password` query parameters must be present; otherwise the
+  request is rejected with `401 Unauthorized`
+  (`WWW-Authenticate: Basic realm="broxy4g"`).
+- Credentials are never logged. The uvicorn access log (emitted before any
+  FastAPI middleware and containing the full query string) is passed through
+  a redacting formatter that replaces the value of sensitive
+  key=value pairs (`user`, `password`, `token`, …) with `***`.
+
+Because URLs can leak via proxies, browser history and logs, keep this option
+off unless a GET-only tool genuinely needs it. The frontend always uses Basic
+Auth.
+
 ## Endpoints
 
 ### Health Check
@@ -244,7 +272,7 @@ Disconnects a dongle from the network.
 
 #### Reset Dongle
 
-**POST** `/api/v1/dongles/{id}/reset`
+**POST / GET** `/api/v1/dongles/{id}/reset`
 
 Resets a dongle. This is an exclusive, bounded operation and is a **recovery**
 action: it is allowed from `ONLINE`, `DEGRADED`, `OFFLINE` and `ERROR`. The
@@ -272,6 +300,16 @@ the per-dongle lock is always released on completion, timeout or cancellation.
   the dongle is in a state from which a reset is not meaningful — `DISCOVERED`,
   `UNENROLLED` or `CONFIGURING` (the reset needs an already-enrolled dongle).
   The message has the exact form `reset impossible dans l'état <STATE>`.
+
+**GET variant.** The same handler is exposed as `GET /api/v1/dongles/{id}/reset`
+for external GET-only tools (Ankabot) that can pass only a URL — combine it
+with the opt-in query string auth to trigger a reset with a single link.
+Behaviour is identical to the POST variant: same `ResetService`, same
+per-dongle lock (a concurrent reset returns `PENDING`), same idempotence and
+`DONE` / `ERROR` / `PENDING` statuses. The GET response carries
+`Cache-Control: no-store` and `Pragma: no-cache` so the outcome of an
+administrative action is never cached. The trigger is logged (with the HTTP
+method used, without any secret).
 
 **Modem reset.** The reset performs a real USB modem reset
 (`mmcli -m <path> --reset`) after tearing down the bearer: this is the only

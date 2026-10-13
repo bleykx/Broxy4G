@@ -14,6 +14,7 @@ from broxy4g.adapters.net_interface import FakeInterface, InterfaceAdapter
 from broxy4g.adapters.nftables import FakeNftables, NftablesAdapter
 from broxy4g.adapters.routing import FakeRouting, RoutingAdapter
 from broxy4g.api.routers.allowed_hosts import router as allowed_hosts_router
+from broxy4g.api.routers.dongle_reset import router as dongle_reset_router
 from broxy4g.api.routers.dongles import router as dongles_router
 from broxy4g.api.routers.health import router as health_router
 from broxy4g.api.routers.local_connections import router as local_connections_router
@@ -194,6 +195,7 @@ def create_app(
 
     app.include_router(health_router)
     app.include_router(dongles_router, prefix="/api/v1")
+    app.include_router(dongle_reset_router, prefix="/api/v1")
     app.include_router(proxies_router, prefix="/api/v1")
     app.include_router(local_connections_router, prefix="/api/v1")
     app.include_router(allowed_hosts_router, prefix="/api/v1")
