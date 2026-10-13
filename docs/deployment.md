@@ -160,6 +160,26 @@ repository problem. On systemd-resolved hosts (Ubuntu, Raspberry Pi OS) the
 container inherits the `127.0.0.53` stub, unreachable inside the container, so
 `apt-get update` never reaches `deb.debian.org`.
 
+The same broken DNS breaks the **frontend** stage in a far more deceptive way:
+`npm ci` cannot reach `registry.npmjs.org`, burns its retries (~145 s, the run
+duration is remarkably constant), then exits with **code 0** while leaving
+`node_modules` incomplete:
+
+```text
+npm error Exit handler never called!
+npm error This is an error with npm itself. Please report this error at:
+npm error   <https://github.com/npm/cli/issues>
+```
+
+The build then fails one step later with a misleading `sh: tsc: not found`,
+because `tsc` (a devDependency) was never installed. Fix the container DNS
+(below); do not go hunting after npm. To confirm the diagnosis in seconds:
+
+```bash
+docker run --rm node:20-alpine getent hosts registry.npmjs.org; echo "exit=$?"
+docker run --rm --network=host node:20-alpine getent hosts registry.npmjs.org
+```
+
 Diagnose on the host:
 
 ```bash

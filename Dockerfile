@@ -3,24 +3,24 @@
 # Stage 1: build the frontend (multi-arch base image)
 FROM node:20-alpine AS frontend
 WORKDIR /app/frontend
-# Copy the sources BEFORE installing: `npm ci` wipes and rebuilds node_modules
-# from the lockfile, so nothing coming from the build context can clobber the
-# freshly installed dependencies. This matters because tsc/vite live in
-# devDependencies, and a stale host node_modules (whose .bin/tsc may be a
-# dangling link) must never be able to shadow them.
-COPY frontend/ ./
+# Dependencies first: this layer stays cached until package.json /
+# package-lock.json change, so `npm ci` is not re-run on every source edit
+# (~2-3 min on a Raspberry Pi).
+COPY frontend/package*.json ./
 # --include=dev is explicit: the build needs devDependencies (tsc, vite).
-# NODE_OPTIONS disables Node 20's "happy eyeballs" (autoSelectFamily) path.
-# On a host whose IPv6 route is blackholed/flaky (this Raspberry Pi, where DNS
-# resolution is already unstable) the buggy socket handling lets `npm ci` drain
-# its event loop and exit 0 with a HALF-INSTALLED node_modules (npm/cli#6409),
-# which then only shows up as a misleading `sh: tsc: not found` in the next step.
-# `--no-audit --no-fund` also cut the number of registry round-trips.
+# --no-audit --no-fund cut the number of registry round-trips.
+# NODE_OPTIONS disables Node 20's "happy eyeballs" (autoSelectFamily) path: the
+# registry publishes AAAA records, and in a container without a usable IPv6
+# route that path can make `npm ci` drain its event loop and exit **0** with a
+# half-installed node_modules (npm/cli#6409) — a silent failure that only shows
+# up later as `sh: tsc: not found`. Cheap insurance, not the cause of a broken
+# build: a container with no working DNS fails before npm ever gets that far.
 # The `test -x` assertions fail fast, at this step and with a readable message,
 # instead of a late and obscure failure in the build step below.
 RUN NODE_OPTIONS=--no-network-family-autoselection npm ci --include=dev --no-audit --no-fund \
  && test -x node_modules/.bin/tsc \
  && test -x node_modules/.bin/vite
+COPY frontend/ ./
 RUN npm run build
 
 # Stage 2: Docker CLI + compose plugin, from the official multi-arch image
