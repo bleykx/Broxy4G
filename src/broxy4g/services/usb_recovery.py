@@ -15,6 +15,11 @@ Politique (règles métier) :
 - **au plus une tentative par dongle et par cycle de reconciliation** (le
   compteur est remis à zéro par ``begin_cycle()`` au début de
   ``reconcile_all()``) ;
+- **cooldown inter-cycles** : après une tentative, la ré-énumération d'un même
+  dongle n'est retentée qu'au bout de ``cooldown_seconds`` (300 s par défaut,
+  variable ``BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS``). Ce bornage survit aux
+  cycles — ``begin_cycle()`` ne le remet **pas** à zéro — et n'est gardé qu'en
+  mémoire : un redémarrage du processus autorise donc une tentative immédiate ;
 - **attente bornée** de la réapparition du modem chez ModemManager
   (disparition puis retour), timeout configurable : au-delà, un WARNING est
   journalisé et c'est le cycle suivant qui décide — jamais de boucle ;
@@ -53,7 +58,7 @@ class UsbRecoveryResult:
 
 
 class UsbRecoveryService:
-    """Une ré-énumération USB bornée, au plus une fois par dongle par cycle."""
+    """Ré-énumération USB bornée : une fois par cycle, avec backoff inter-cycles."""
 
     def __init__(
         self,
@@ -63,6 +68,7 @@ class UsbRecoveryService:
         reset_lock: ResetLock | None = None,
         reappearance_timeout: float = 10.0,
         poll_delay: float = 0.5,
+        cooldown_seconds: float = 300.0,
     ):
         self.dongle_repo = dongle_repo
         self.uplink_routes = uplink_routes
@@ -70,10 +76,19 @@ class UsbRecoveryService:
         self.reset_lock = reset_lock
         self._reappearance_timeout = reappearance_timeout
         self._poll_delay = poll_delay
+        self._cooldown_seconds = cooldown_seconds
+        # Horodatage monotone de la dernière tentative par dongle ; survit aux
+        # cycles (jamais remis à zéro par ``begin_cycle``), mémoire seulement.
+        self._last_attempt_at: dict[UUID, float] = {}
         self._attempted_this_cycle: set[UUID] = set()
 
     def begin_cycle(self) -> None:
-        """Début de ``reconcile_all()`` : réinitialise le compteur par cycle."""
+        """Début de ``reconcile_all()`` : réinitialise le compteur par cycle.
+
+        Ne remet **pas** à zéro le cooldown inter-cycles (``_last_attempt_at``) :
+        celui-ci est volontairement conservé d'un cycle à l'autre pour éviter le
+        flottement de ré-énumération d'un dongle resté bloqué.
+        """
         self._attempted_this_cycle.clear()
 
     async def attempt(self, dongle_id: UUID) -> UsbRecoveryResult:
@@ -86,8 +101,33 @@ class UsbRecoveryService:
             return UsbRecoveryResult(False, False, "reset en cours")
         if dongle_id in self._attempted_this_cycle:
             return UsbRecoveryResult(False, False, "déjà tenté ce cycle")
+        cooldown_reason = self._cooldown_reason(dongle_id)
+        if cooldown_reason is not None:
+            logger.info(
+                "Récupération USB dongle %s reportée (cooldown inter-cycles) : %s",
+                dongle_id, cooldown_reason,
+            )
+            return UsbRecoveryResult(False, False, cooldown_reason)
         self._attempted_this_cycle.add(dongle_id)
+        # Horodater l'essai maintenant : le cooldown tient aussi si la tentative
+        # échoue (c'est précisément le but — pas de ré-énumération à chaque cycle).
+        self._last_attempt_at[dongle_id] = time.monotonic()
         return await self._reenumerate(dongle)
+
+    def _cooldown_reason(self, dongle_id: UUID) -> str | None:
+        """Raison de blocage par cooldown (secondes restantes), ou None si autorisé.
+
+        Seule la dernière **tentative réelle** est horodatée ; un blocage par
+        cooldown n'actualise jamais l'horodatage.
+        """
+        last = self._last_attempt_at.get(dongle_id)
+        if last is None:
+            return None
+        elapsed = time.monotonic() - last
+        if elapsed < self._cooldown_seconds:
+            remaining = self._cooldown_seconds - elapsed
+            return f"cooldown actif ({remaining:.0f}s restantes)"
+        return None
 
     async def _reenumerate(self, dongle: Dongle) -> UsbRecoveryResult:
         authorized_file = await self._resolve_authorized_file(dongle)

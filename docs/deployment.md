@@ -259,6 +259,13 @@ dongle stuck in `ERROR`/`OFFLINE` with a PPP bearer, see
 dongle, never a parent hub — see `docs/architecture.md`), so the process
 needs write access to that sysfs subtree.
 
+To avoid re-enumerating a stuck dongle on **every** reconciliation cycle, a
+**cross-cycle cooldown** (backoff) gates retries of the same dongle: default
+**300 s**, tunable via `BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS`. The cooldown
+survives cycle boundaries (it is *not* reset by `begin_cycle()`) but is kept
+**in memory only**, so a process restart allows one immediate attempt.
+Invalid or negative values fall back to the 300 s default.
+
 - **Docker (default deployment): no compose change is required.** The
   service already runs `privileged: true`, which makes `/sys` mounted
   read-write inside the container, and the image sets no `USER` (the process
@@ -314,6 +321,7 @@ docker buildx build --platform linux/arm64 -t broxy4g:local .
 | BROXY4G_PROXY_HOST_IPS | Comma-separated host IPs to route through proxies | none |
 | BROXY4G_HOST | Host to bind to | 0.0.0.0 |
 | BROXY4G_PORT | Port to listen on | 8080 |
+| BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS | Cross-cycle backoff (s) before soft USB re-enumeration of the same dongle is retried; in-memory only (a process restart allows one immediate attempt). Invalid or negative values fall back to the default | 300 |
 | BROXY4G_ALLOW_QUERY_AUTH | Opt-in: allow API auth via query string (`?user=…&password=…`) for GET-only external tools; accepted values `1`/`true`/`yes`/`on` (case-insensitive) | false (fail-closed) |
 
 ## Security Notes

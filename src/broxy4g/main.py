@@ -75,6 +75,22 @@ def parse_args():
     return parser.parse_args()
 
 
+def resolve_usb_recovery_cooldown() -> float:
+    """Backoff inter-cycles de la récupération USB douce, en secondes.
+
+    Lit ``BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS`` (défaut 300) ; une valeur
+    absente, illisible ou négative retombe sur 300 s (jamais de bornage nul
+    ou absurde accidentel).
+    """
+    default = 300.0
+    raw = os.environ.get("BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS", "300")
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
 async def run_workers(app, stop_event: asyncio.Event, work_dir: str):
     """Run discovery and reconciliation workers until stopped."""
     shell = RealShell()
@@ -93,6 +109,7 @@ async def run_workers(app, stop_event: asyncio.Event, work_dir: str):
         worker_uplink_routes,
         RealUsbDevice(),
         reset_lock=app.state.reset_lock,
+        cooldown_seconds=resolve_usb_recovery_cooldown(),
     )
     reconciliation = ReconciliationWorker(
         dongle_repo=app.state.dongle_repo,

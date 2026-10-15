@@ -66,8 +66,10 @@ composant **le plus profond** du chemin (les dongles réels sont souvent
 imbriqués derrière des hubs, ex. `…/usb1/1-1/1-1.2/1-1.2.4`) : un hub est
 **jamais** ciblé. Politique : uniquement `ERROR`/`OFFLINE`,
 jamais pendant un reset (verrou tenu), au plus une tentative par dongle et
-par cycle, attente bornée (~10 s) de la ré-apparition du modem, no-op
-journalisé si le chemin est introuvable. Détails et bornes de sécurité dans
+par cycle, **plus un cooldown inter-cycles** (par défaut 300 s,
+`BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS`, en mémoire seulement) pour ne pas
+ré-énumérer un dongle resté bloqué à chaque cycle, attente bornée (~10 s) de
+la ré-apparition du modem, no-op journalisé si le chemin est introuvable. Détails et bornes de sécurité dans
 `docs/architecture.md` ; prérequis d'écriture sysfs dans `docs/deployment.md`.
 
 ## Interface Address and Probes

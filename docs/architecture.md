@@ -175,8 +175,17 @@ Règles métier :
   `DEGRADED`) ; jamais si le **verrou de reset** est tenu pour le dongle.
 - **Au plus une tentative par dongle et par cycle de reconciliation** : le
   compteur est remis à zéro par `begin_cycle()` au début de
-  `reconcile_all()` ; si le dongle reste bloqué, le cycle suivant
-  (30 s) réessaie.
+  `reconcile_all()`.
+- **Cooldown inter-cycles** (backoff temporel) : après une tentative, la
+  ré-énumération d'un même dongle n'est retentée qu'au bout de
+  `cooldown_seconds` (`BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS`, défaut
+  **300 s**). Sans ce bornage, un dongle resté `ERROR` serait ré-énuméré à
+  **chaque** cycle (le modem revient sur USB en <1 s mais ModemManager met
+  plus de temps à le ré-enregistrer, si bien que `connect()` échoue de
+  nouveau). Le cooldown **survit aux cycles** (`begin_cycle()` ne le remet pas
+  à zéro) et n'est gardé qu'en **mémoire** : un redémarrage du processus
+  autorise une tentative immédiate. Les cooldowns sont **par dongle**
+  (indépendants).
 - **Attente bornée** (timeout par défaut ~10 s) de la ré-apparition du modem
   chez ModemManager (disparition puis retour) ; au timeout : WARNING
   journalisé, pas de boucle, le cycle suivant décide.

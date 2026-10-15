@@ -1,4 +1,5 @@
 import logging
+import time
 
 import pytest
 
@@ -7,6 +8,7 @@ from broxy4g.adapters.usb_device import USB_DEVICES_ROOT, FakeUsbDevice
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
+from broxy4g.services.usb_recovery import UsbRecoveryService
 
 IMEI = "123456789012345"
 MODEM_PATH = "/org/freedesktop/ModemManager1/Modem/0"
@@ -281,3 +283,142 @@ async def test_authorized_ends_at_one_even_if_reauth_fails(
     assert result.attempted is True
     assert await fake_usb_device.read_authorized(authorized_file) is True
     assert (authorized_file, True) in fake_usb_device.writes  # la 2e tentative a écrit
+
+
+def _service_with_cooldown(dongle_repo, uplink_routes, usb, reset_lock, cooldown_seconds=300.0):
+    """Un service de récupération avec un vrai backoff inter-cycles.
+
+    Le faux partagé (``usb_recovery``) désactive le cooldown (0 s) pour isoler
+    la dédup par cycle ; ici on le (ré)active pour tester le bornage temporel.
+    """
+    return UsbRecoveryService(
+        dongle_repo,
+        uplink_routes,
+        usb,
+        reset_lock,
+        reappearance_timeout=0.2,
+        poll_delay=0.02,
+        cooldown_seconds=cooldown_seconds,
+    )
+
+
+async def test_failed_attempt_sets_cross_cycle_cooldown(
+    dongle_repo, uplink_routes, fake_modem, fake_usb_device, fake_reset_lock
+):
+    """Une tentative échouée horodate le cooldown : l'essai suivant est reporté
+    sans re-énumérer (aucun nouvel appel à l'adaptateur USB)."""
+    dongle = await _save_dongle(dongle_repo, DongleState.ERROR)
+    _add_modem(fake_modem)
+    authorized_file = fake_usb_device.register(DEVICE_PATH)
+    fake_usb_device.on_reenumeration = lambda: fake_modem.forget(MODEM_PATH)
+    service = _service_with_cooldown(dongle_repo, uplink_routes, fake_usb_device, fake_reset_lock)
+
+    first = await service.attempt(dongle.id)
+    assert first.attempted is True
+    assert first.reappeared is False  # le modem ne réapparaît jamais
+    assert fake_usb_device.writes == [(authorized_file, False), (authorized_file, True)]
+
+    service.begin_cycle()  # nouveau cycle : la dédup par cycle est remise à zéro
+    second = await service.attempt(dongle.id)
+    assert second.attempted is False
+    assert "cooldown" in second.reason  # c'est le backoff inter-cycles qui bloque
+    assert len(fake_usb_device.writes) == 2  # l'adaptateur n'a pas été re-énuméré
+
+
+async def test_cooldown_elapse_allows_retry(
+    dongle_repo, uplink_routes, fake_modem, fake_usb_device, fake_reset_lock
+):
+    """Après expiration du cooldown, la ré-énumération est de nouveau tentée."""
+    dongle = await _save_dongle(dongle_repo, DongleState.ERROR)
+    _add_modem(fake_modem)
+    _wire_reevaluation(fake_usb_device, fake_modem)
+    service = _service_with_cooldown(
+        dongle_repo, uplink_routes, fake_usb_device, fake_reset_lock, cooldown_seconds=300.0
+    )
+
+    first = await service.attempt(dongle.id)
+    assert first.attempted is True
+
+    service.begin_cycle()  # réinitialise la dédup par cycle, pas le cooldown
+    blocked = await service.attempt(dongle.id)
+    assert blocked.attempted is False
+    assert "cooldown" in blocked.reason
+
+    # Fait avancer l'horloge au-delà du cooldown sans attendre réellement.
+    service._last_attempt_at[dongle.id] = time.monotonic() - 301
+    retry = await service.attempt(dongle.id)
+    assert retry.attempted is True
+
+
+async def test_begin_cycle_does_not_clear_cooldown(
+    dongle_repo, uplink_routes, fake_modem, fake_usb_device, fake_reset_lock
+):
+    """``begin_cycle()`` ne remet pas à zéro le cooldown inter-cycles."""
+    dongle = await _save_dongle(dongle_repo, DongleState.ERROR)
+    _add_modem(fake_modem)
+    _wire_reevaluation(fake_usb_device, fake_modem)
+    service = _service_with_cooldown(
+        dongle_repo, uplink_routes, fake_usb_device, fake_reset_lock, cooldown_seconds=300.0
+    )
+
+    await service.attempt(dongle.id)
+    service.begin_cycle()
+
+    assert dongle.id in service._last_attempt_at  # l'horodatage est conservé
+    second = await service.attempt(dongle.id)
+    assert second.attempted is False
+    assert "cooldown" in second.reason
+
+
+async def test_cooldowns_are_per_dongle_independent(
+    dongle_repo, uplink_routes, fake_modem, fake_usb_device, fake_reset_lock
+):
+    """Le cooldown d'un dongle n'en bloque pas un autre (indépendance)."""
+    async def save(imei: str) -> Dongle:
+        d = Dongle(identity=IdentityMaterial(imei=imei), label="Test")
+        d.change_state(DongleState.CONFIGURING)
+        d.change_state(DongleState.ERROR)
+        await dongle_repo.save(d)
+        return d
+
+    d1 = await save("111111111111111")
+    d2 = await save("222222222222222")
+    fake_modem.add_modem(ModemInfo(
+        path="/org/freedesktop/ModemManager1/Modem/1", imei="111111111111111",
+        iccid=None, usb_serial=None, state="disconnected", interface_name="wwan0",
+        device_path="/sys/devices/usb1/1-1",
+    ))
+    fake_modem.add_modem(ModemInfo(
+        path="/org/freedesktop/ModemManager1/Modem/2", imei="222222222222222",
+        iccid=None, usb_serial=None, state="disconnected", interface_name="wwan0",
+        device_path="/sys/devices/usb1/1-2",
+    ))
+    fake_usb_device.register("/sys/devices/usb1/1-1")
+    fake_usb_device.register("/sys/devices/usb1/1-2")
+    service = _service_with_cooldown(dongle_repo, uplink_routes, fake_usb_device, fake_reset_lock)
+
+    first1 = await service.attempt(d1.id)  # horodate le cooldown de d1
+    first2 = await service.attempt(d2.id)  # NON bloqué par le cooldown de d1
+    assert first1.attempted is True
+    assert first2.attempted is True
+
+    service.begin_cycle()
+    assert "cooldown" in (await service.attempt(d1.id)).reason  # d1 bloqué
+    assert "cooldown" in (await service.attempt(d2.id)).reason  # d2 bloqué (sien)
+
+
+async def test_successful_first_attempt_still_works_with_cooldown(
+    dongle_repo, uplink_routes, fake_modem, fake_usb_device, fake_reset_lock
+):
+    """Happy path : une première tentative réussie pose le cooldown sans l'altérer."""
+    dongle = await _save_dongle(dongle_repo, DongleState.ERROR)
+    _add_modem(fake_modem)
+    authorized_file = _wire_reevaluation(fake_usb_device, fake_modem)
+    service = _service_with_cooldown(dongle_repo, uplink_routes, fake_usb_device, fake_reset_lock)
+
+    result = await service.attempt(dongle.id)
+
+    assert result.attempted is True
+    assert result.reappeared is True
+    assert dongle.id in service._last_attempt_at  # cooldown posé
+    assert fake_usb_device.writes == [(authorized_file, False), (authorized_file, True)]

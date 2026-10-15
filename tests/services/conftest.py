@@ -126,6 +126,9 @@ def fake_usb_device():
 @pytest.fixture
 def usb_recovery(dongle_repo, uplink_routes, fake_usb_device, fake_reset_lock):
     # Timeout court : les tests n'attendent pas le délai par défaut (~10 s).
+    # Cooldown inter-cycles désactivé (0 s) : le faux service isole la dédup
+    # par cycle ; les tests dédiés au backoff construisent leur propre service
+    # avec un ``cooldown_seconds`` réel (cf. test_usb_recovery.py).
     return UsbRecoveryService(
         dongle_repo,
         uplink_routes,
@@ -133,6 +136,7 @@ def usb_recovery(dongle_repo, uplink_routes, fake_usb_device, fake_reset_lock):
         fake_reset_lock,
         reappearance_timeout=0.2,
         poll_delay=0.02,
+        cooldown_seconds=0.0,
     )
 
 
