@@ -93,6 +93,49 @@ Restarting NetworkManager (or a reboot) applies the pattern. If the pattern
 is missing or too narrow, NetworkManager may take over the dongle interface
 and break the dedicated routing table / bearer IP configuration.
 
+### Stable dongle netdev names (systemd `.link` files, multi-dongle hosts)
+
+Huawei E3372 dongles all share the same MAC (`00:1e:10:1f:00:00`), so kernel
+interface names are unstable and ambiguous when several dongles are present
+(`wwanN`/`wwx001e101f0000` get re-attributed at every USB re-enumeration).
+Give each dongle a stable name per **physical USB port** with a
+`/etc/systemd/network/10-broxy4g-dongle-N.link` file (rationale, mapping and
+rollback: `docs/networking.md`, section « Nommage stable par port USB
+physique »):
+
+```
+[Match]
+Path=<chemin udev du port USB, ex. platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.2.2:1.1>
+
+[Link]
+Name=dongle-N
+```
+
+Procedure (one dongle at a time, always with 3 other uplinks alive):
+
+1. For each dongle, read the udev path from
+   `udevadm info /sys/class/net/<iface>` (`ID_PATH=…`) and correlate it with
+   the IMEI (`mmcli -m <modem>` → `physdev`/`imei`); write the `.link`
+   (`Name=dongle-N`, hyphen mandatory — must match the NM `dongle-*`
+   unmanaged pattern).
+2. Validate the match: `udevadm test /sys/class/net/<iface>` must show the
+   expected `.link` applied and the target name, exactly once per netdev.
+   ⚠️ On the reference host this also renamed the live netdev immediately
+   (2026-10-15, udev 252) — see `docs/networking.md`.
+3. Apply: re-enumerate the dongle
+   (`echo 0 > /sys/bus/usb/devices/<port>/authorized`, ~2 s, then `echo 1`).
+   A reboot applies everything at once as an alternative.
+4. Verify: `ip -br link | grep dongle-` shows `dongle-N` (name must not
+   change after another re-enumeration), `nmcli dev` does **not** list it,
+   `networkctl status dongle-N` reports `unmanaged`, and the nftables
+   ruleset contains `oifname "dongle-N"` rules.
+5. Reconnect via the API (or let the reconciliation do it): Broxy4G re-resolves
+   the netdev by IMEI/sysfs, so no application change or data migration is
+   needed.
+
+Rollback: delete the `.link` files and re-enumerate each dongle (names return
+to `wwan*`/`wwx*`); the application converges on its own.
+
 ## systemd Setup
 
 ### Copy Service File

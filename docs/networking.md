@@ -34,10 +34,12 @@ renommage `ip link set <if> name …` fait perdre à ModemManager le port résea
 fragile au reboot suivant.
 
 - Le nom d'interface est le **nom du netdev assigné par le noyau** (`wwan0`,
-  `wwx0`, …), rattaché au périphérique USB du modem. Il est résolu **à la
-  lecture** par l'adaptateur ModemManager (`RealModemManager` via sysfs :
-  le netdev dont le chemin sysfs est sous le chemin USB du modem, avec
-  frontière de séparateur stricte), puis **persisté** sur le dongle
+  `wwx0`, …) ou, si un fichier systemd `.link` l'impose, un **nom stable par
+  port USB physique** (`dongle-N`, cf. sous-section ci-dessous). Dans tous les
+  cas il est rattaché au périphérique USB du modem et résolu **à la lecture**
+  par l'adaptateur ModemManager (`RealModemManager` via sysfs : le netdev dont
+  le chemin sysfs est sous le chemin USB du modem, avec frontière de
+  séparateur stricte), puis **persisté** sur le dongle
   (`dongle.interface_name`) comme confort d'exploitation.
 - Après un reset modem (ré-énumération USB), le noyau peut attribuer un autre
   nom (`wwan0` → `wwx0`, …) : le netdev est simplement **re-résolu** via
@@ -46,9 +48,61 @@ fragile au reboot suivant.
   ni l'index USB ni le nom d'interface ne sont utilisés pour l'identifier.
   Le nom d'interface est un confort d'exploitation, jamais une clé.
 - Conséquence côté NetworkManager : le motif `unmanaged-devices` doit couvrir
-  les noms de noyau `wwan*`/`wwx*` (et pas seulement les anciens noms `dongle-*`)
-  pour que NetworkManager ne se soit jamais empare de l'interface du dongle
-  (cf. `docs/deployment.md`).
+  les noms de noyau `wwan*`/`wwx*` **et** les noms stables `dongle-*` (cf.
+  sous-section ci-dessous et `docs/deployment.md`) pour que NetworkManager ne
+  s'empare jamais de l'interface du dongle.
+
+### Nommage stable par port USB physique (fichiers systemd `.link`)
+
+Les dongles Huawei E3372 partagent **le même MAC**
+(`00:1e:10:1f:00:00`). Avec plusieurs dongles, le nom prédictible
+`wwx<MAC>` est donc ambigu, et les noms `wwanN`/`wwx…` attribués par le noyau
+se réattribuent à chaque ré-énumération USB. Sur les hôtes multi-dongles on
+pose donc un nom **stable par port USB physique** via des fichiers
+`/etc/systemd/network/10-broxy4g-dongle-N.link`, appliqués par
+`systemd-udevd` **à l'énumération** du netdev :
+
+```
+# broxy4g: stable netdev name for Huawei E3372 dongle-N
+# Physical USB port: <port>   (IMEI <imei>, ex <ancien nom>)
+[Match]
+Path=<chemin udev du port USB>
+
+[Link]
+Name=dongle-N
+```
+
+- `Path=` est le **chemin udev** (pas le chemin sysfs) : le préfixe `usb-`
+  suit la forme `usb-0:<portpath>:1.1` (ex. `usb-0:1.2.2:1.1`), sans le
+  préfixe `1-` de la notation sysfs. On le lit via
+  `udevadm info /sys/class/net/<iface>` (propriété `ID_PATH`) ; le chemin
+  sysfs complet du port reste documenté en commentaire du fichier.
+- Chaque `.link` doit matcher **exactement un** netdev : vérifier avec
+  `udevadm test /sys/class/net/<iface>` (« Config file … is applied »,
+  « renamed from … to 'dongle-N' »).
+- Le nom **doit** matcher le motif NM `dongle-*` (tiret compris) : le nom
+  `dongle1` (sans tiret) serait capturé par NetworkManager.
+- Un `ip link set down/up` **ne renomme pas** : l'application d'un `.link`
+  nouveau ou modifié nécessite une ré-énumération du dongle (ou un reboot) —
+  procédure dans `docs/deployment.md`.
+- ⚠️ Observation (2026-10-15, Debian, udev 252) : sur la machine cible,
+  `udevadm test /sys/class/net/<iface>` sur un netdev existant a déclenché le
+  renommage **immédiatement** (renommé « while UP », confirmé dmesg),
+  contrairement à l'avertissement « debug only » du manuel. Compter sur la
+  ré-énumération pour appliquer un `.link`, pas sur `udevadm test`.
+- Mapping en production sur proxpi (déterministe : ordre lexicographique des
+  ports USB) :
+
+  | netdev | port USB | IMEI |
+  | --- | --- | --- |
+  | `dongle-1` | `1-1.2.2` | `867028041329312` |
+  | `dongle-2` | `1-1.2.4.1` | `867028041332043` |
+  | `dongle-3` | `1-1.2.4.3` | `867028041311195` |
+  | `dongle-4` | `1-1.2.4.4.2` | `867028041311336` |
+
+- **Rollback** : supprimer les `.link` puis ré-énumérer chaque dongle →
+  retour aux noms de noyau `wwan*`/`wwx*`. Non fatal : broxy4g re-résout le
+  netdev par sysfs à chaque connexion, le pire cas est le statu quo.
 
 ### Récupération douce des bearers PPP (ré-énumération USB)
 
