@@ -72,6 +72,36 @@ ré-énumérer un dongle resté bloqué à chaque cycle, attente bornée (~10 s)
 la ré-apparition du modem, no-op journalisé si le chemin est introuvable. Détails et bornes de sécurité dans
 `docs/architecture.md` ; prérequis d'écriture sysfs dans `docs/deployment.md`.
 
+### Mode USB du modem (émulation CD-ROM / `AT^SETPORT`)
+
+Les dongles Huawei E3372 sont livrés en mode *stick* avec **émulation CD-ROM** :
+interfaces `usb-storage` en plus des interfaces `option`/`huawei_cdc_ncm`, et un
+`/dev/sr0` qui génère du bruit (probes `udisksd`, erreurs « medium ») sans être
+utile. On retire cette émulation **au niveau du firmware** plutôt que côté OS
+(pas de `/dev/sr0` du tout, déterminisme au reboot).
+
+- Le dongle est identifié par son **IMEI** (`867028041311195` pour le dongle
+  concerné ici), **jamais** par l'index `ttyUSB` (cf. plus haut) : après une
+  ré-énumération les indices bougent.
+- La commande est envoyée sur le port AT (`interface option`, `115200 8N1`).
+  Grammaire : `AT^SETPORT="<émulation>;<interfaces>"` — avant le `;`, `A1`=CD-ROM,
+  `A2`=SD, `FF`=aucune émulation ; après le `;`, `12`=**PCUI (AT)**, `16`=**NCM
+  (netdev)**, `1`/`10`=PPP 3G/4G.
+- Procédure : `AT^SETPORT?` (**noter la valeur**), `AT^SETPORT="FF;12,16"`,
+  `AT^SETPORT?` (vérifier), puis `AT^RESET` (indispensable ; le dongle se
+  ré-énumère seul en ~30 s, sans replug physique).
+- Règle absolue : **toujours garder `12` (PCUI)** — sans lui, plus de port AT et
+  donc plus moyen d'annuler (brick potentiel). Rollback :
+  `AT^SETPORT="A1,A2;12,1,16,A1,A2"` + `AT^RESET`.
+- Résultat attendu : interfaces réduites à `option`+`huawei_cdc_ncm`, `/dev/sr0`
+  disparu, netdev NCM conservé. Appliqué le 2026-10-15 sur `867028041311195`
+  (USB `1-1.2.4.3`) : `A1,A2;12,1,16,A1,A2` → `FF;12,16`, dongle `ONLINE` après
+  reconvergence, proxy sain.
+- ⚠️ Après `FF;12,16` il ne reste **qu'un** port PCUI : ModemManager s'en empare
+  en exclusif, donc toute commande AT brute concurrente ne répond pas — il faut
+  suspendre ModemManager (`systemctl stop ModemManager`) ou utiliser
+  `mmcli --command=…` (mode debug) pour intervenir.
+
 ## Interface Address and Probes
 
 Seule une IPv4 active par interface dongle. Avant toute assignation du bearer,
