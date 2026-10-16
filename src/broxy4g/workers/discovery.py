@@ -21,13 +21,27 @@ class DiscoveryWorker:
         self.modem = modem
         self.dongle_repo = dongle_repo
         self.service = DiscoveryService(modem, dongle_repo, apn_source=apn_source)
+        self._announced_keys: set[str] = set()
 
     async def discover(self) -> list[ModemInfo]:
-        """Scanne les modems et retourne ceux non encore enrôlés."""
+        """Scanne les modems et retourne ceux non encore enrôlés.
+
+        La détection n'est journalisée qu'à la transition (première
+        observation) : le dédoublonnage des identités annoncées est
+        conservé en mémoire et réinitialisé au redémarrage du processus
+        (au plus une ligne supplémentaire par dongle au redémarrage).
+        """
         discovered_dongles = await self.service.list_unenrolled()
+        current_keys = {
+            d.identity_imei or d.identity_usb_serial or d.identity_iccid
+            for d in discovered_dongles
+        }
         for dongle in discovered_dongles:
-            logger.info("Nouveau dongle détecté : %s (%s)", dongle.suggested_label, 
-                       dongle.identity_imei or dongle.identity_usb_serial or dongle.identity_iccid)
+            identity_key = dongle.identity_imei or dongle.identity_usb_serial or dongle.identity_iccid
+            if identity_key in self._announced_keys:
+                continue
+            logger.info("Nouveau dongle détecté : %s (%s)", dongle.suggested_label, identity_key)
+        self._announced_keys = current_keys
         # Return the original ModemInfo objects for backward compatibility
         modems = await self.modem.list_modems()
         modem_map = {}
