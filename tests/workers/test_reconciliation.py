@@ -52,6 +52,57 @@ async def test_reconcile_degraded_calls_connect(
     assert dongle.state == DongleState.ONLINE
 
 
+async def test_reconcile_degraded_live_bearer_skips_connect(
+    reconciliation_worker, enrollment_service, fake_modem, fake_iface, fake_connectivity
+):
+    """DEGRADED avec bearer vivant : connect() n'est PAS appelé (pas de
+    flush_ipv4/assign_address, donc pas de changement d'IP de bearer), et
+    l'état repasse à ONLINE si la sonde réussit."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    add_modem(fake_modem)
+    fake_connectivity.set_public_ip("1.2.3.4")
+    dongle.change_state(DongleState.CONNECTING)
+    dongle.change_state(DongleState.ONLINE)
+    dongle.change_state(DongleState.DEGRADED)
+    await reconciliation_worker.dongle_repo.save(dongle)
+    fake_iface.set_address("wwan0", BEARER.address)  # bearer à jour
+
+    with patch.object(
+        reconciliation_worker.connection_service, "connect", new=AsyncMock()
+    ) as mock_connect:
+        await reconciliation_worker.reconcile_dongle(dongle.id)
+
+    mock_connect.assert_not_awaited()
+    dongle = await reconciliation_worker.dongle_repo.get_by_id(dongle.id)
+    assert dongle.state == DongleState.ONLINE
+
+
+async def test_reconcile_degraded_dead_bearer_calls_connect(
+    reconciliation_worker, enrollment_service, fake_modem, fake_iface, fake_connectivity
+):
+    """DEGRADED avec bearer mort (pas d'IP bearer) : connect() est appelé."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    fake_modem.add_modem(ModemInfo(
+        path=MODEM_PATH, imei="123456789012345", iccid=None,
+        usb_serial=None, state="connected", interface_name="wwan0", device_path=None,
+    ))  # modem présent, mais AUCUNE IP bearer
+    fake_connectivity.set_public_ip("1.2.3.4")
+    dongle.change_state(DongleState.CONNECTING)
+    dongle.change_state(DongleState.ONLINE)
+    dongle.change_state(DongleState.DEGRADED)
+    await reconciliation_worker.dongle_repo.save(dongle)
+    fake_iface.set_address("wwan0", "10.0.0.5")
+
+    with patch.object(
+        reconciliation_worker.connection_service, "connect", new=AsyncMock()
+    ) as mock_connect:
+        await reconciliation_worker.reconcile_dongle(dongle.id)
+
+    mock_connect.assert_awaited_once()
+    dongle = await reconciliation_worker.dongle_repo.get_by_id(dongle.id)
+    assert dongle.state == DongleState.ONLINE
+
+
 async def test_reconcile_error_calls_connect(
     reconciliation_worker, enrollment_service, fake_modem, fake_iface, fake_connectivity
 ):
@@ -463,6 +514,13 @@ async def test_reconcile_online_repairs_wrong_route_without_reconnect(
 async def test_reconcile_dongle_degraded_without_public_ip(
     reconciliation_worker, enrollment_service, fake_modem, fake_iface, fake_connectivity
 ):
+    """Pas d'IP publique (sonde faible, ping OK) → DEGRADED après 2 cycles.
+
+    Test adapté à l'hystérésis asymétrique : l'intention d'origine
+    (pas d'IP publique ⇒ DEGRADED) est conservée, mais une sonde faible
+    unique ne marque plus DEGRADED (le défaut qui causait les resets en
+    boucle sur lien 3G lent).
+    """
     dongle = await _enroll_with_routing(enrollment_service)
     add_modem(fake_modem)
     dongle.change_state(DongleState.CONNECTING)
@@ -470,9 +528,13 @@ async def test_reconcile_dongle_degraded_without_public_ip(
     await reconciliation_worker.dongle_repo.save(dongle)
     fake_iface.set_address("wwan0", "10.0.0.1")
 
-    # Pas d'IP publique → DEGRADED
+    # Cycle 1 : échec faible (curl échoue, ping OK) → l'état est conservé.
     await reconciliation_worker.reconcile_dongle(dongle.id)
+    dongle = await reconciliation_worker.dongle_repo.get_by_id(dongle.id)
+    assert dongle.state == DongleState.ONLINE
 
+    # Cycle 2 : échec faible consécutif → DEGRADED.
+    await reconciliation_worker.reconcile_dongle(dongle.id)
     dongle = await reconciliation_worker.dongle_repo.get_by_id(dongle.id)
     assert dongle.state == DongleState.DEGRADED
 

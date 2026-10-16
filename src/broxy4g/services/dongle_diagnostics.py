@@ -11,6 +11,7 @@ from uuid import UUID
 from broxy4g.adapters.connectivity import ConnectivityAdapter, PingResult
 from broxy4g.adapters.modem_manager import ModemManagerAdapter, SignalQuality
 from broxy4g.adapters.net_interface import InterfaceAdapter
+from broxy4g.domain.degraded_arbiter import ProbeVerdict
 from broxy4g.domain.dongle import Dongle
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.services.uplink_probe import UplinkProbe
@@ -24,6 +25,7 @@ class DongleMetrics:
     signal_quality: SignalQuality | None = None
     ping: PingResult | None = None
     public_ip: str | None = None
+    public_ip_verdict: ProbeVerdict | None = None
     proxy_health: str | None = None
 
 
@@ -51,8 +53,15 @@ class DongleDiagnostics:
         if modem:
             signal = await self.modem.get_signal(modem.path)
         ping = await self.probe.ping(dongle.interface_name)
-        public_ip = await self.probe.public_ip(dongle.interface_name)
-        return DongleMetrics(signal_quality=signal, ping=ping, public_ip=public_ip)
+        # Une seule sonde d'IP publique : le verdict tri-état porte aussi l'IP
+        # (``public_ip`` conserve sa sémantique ``str | None`` inchangée).
+        ip_probe = await self.probe.public_ip_verdict(dongle.interface_name)
+        return DongleMetrics(
+            signal_quality=signal,
+            ping=ping,
+            public_ip=ip_probe.ip,
+            public_ip_verdict=ip_probe.verdict,
+        )
 
     async def get_public_ip(self, dongle_id: UUID) -> str | None:
         dongle = await self._load(dongle_id)

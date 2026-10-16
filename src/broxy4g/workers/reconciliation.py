@@ -6,11 +6,14 @@ from broxy4g.adapters.docker_compose import DockerComposeAdapter
 from broxy4g.adapters.modem_manager import ModemManagerAdapter
 from broxy4g.adapters.nftables import NftablesAdapter
 from broxy4g.adapters.routing import RoutingAdapter
+from broxy4g.domain.degraded_arbiter import DegradedArbiter
+from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState, can_transition
 from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
 from broxy4g.services.connection import ConnectionService
+from broxy4g.services.connectivity_verdict import ConnectivityVerdictService
 from broxy4g.services.local_connections import LocalConnectionsService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot
 from broxy4g.services.network_isolation import NetworkIsolationService
@@ -46,7 +49,14 @@ class ReconciliationWorker:
         local_connections: LocalConnectionsService | None = None,
         usb_recovery: UsbRecoveryService | None = None,
         proxy_network: ProxyNetworkService | None = None,
+        min_consecutive: int = 2,
     ):
+        """``min_consecutive`` = nb d'échecs faibles consécutifs avant DEGRADED.
+
+        Le compteur d'échecs faibles associé (par dongle) est tenu **en
+        mémoire** par le service de verdict : un redémarrage du service le
+        réinitialise (comme le compteur de ``UsbRecoveryService``).
+        """
         self.dongle_repo = dongle_repo
         self.proxy_repo = proxy_repo
         self.modem = modem
@@ -64,6 +74,7 @@ class ReconciliationWorker:
         self.local_connections = local_connections
         self.usb_recovery = usb_recovery
         self.proxy_network = proxy_network
+        self.verdicts = ConnectivityVerdictService(DegradedArbiter(min_consecutive=min_consecutive))
         self.proxy_reconciler = ProxyReconciler(
             proxy_repo=proxy_repo,
             dongle_repo=dongle_repo,
@@ -126,6 +137,20 @@ class ReconciliationWorker:
         """Réaligne chaque proxy sur son état désiré (activé/désactivé)."""
         await self.proxy_reconciler.reconcile_proxies()
 
+    def _reset_in_progress(self, dongle: Dongle, dongle_id: UUID) -> bool:
+        """Un reset est-il réellement en cours pour ce dongle ?
+
+        Un reset réellement en cours (RESETTING ET verrou tenu) est totalement
+        ignoré : connexion, proxy ET connectivité. Le reset gère tout lui-même.
+        Un RESETTING SANS verrou est un état résiduel post-crash/reboot :
+        on restaure la connexion.
+        """
+        return (
+            dongle.state == DongleState.RESETTING
+            and self.reset_lock is not None
+            and self.reset_lock.is_locked(str(dongle_id))
+        )
+
     async def reconcile_dongle(self, dongle_id: UUID) -> None:
         """Restaure un dongle spécifique : connexion, routes, proxy."""
         dongle = await self.dongle_repo.get_by_id(dongle_id)
@@ -133,19 +158,8 @@ class ReconciliationWorker:
             logger.warning("Dongle %s introuvable, skip", dongle_id)
             return
 
-        # Un reset réellement en cours (RESETTING ET verrou tenu) est totalement
-        # ignoré : connexion, proxy ET connectivité. Le reset gère tout lui-même.
-        # Un RESETTING SANS verrou est un état résiduel post-crash/reboot :
-        # on restaure la connexion.
-        reset_in_progress = (
-            dongle.state == DongleState.RESETTING
-            and self.reset_lock is not None
-            and self.reset_lock.is_locked(str(dongle_id))
-        )
-        if reset_in_progress:
-            logger.info(
-                "Reconciliation dongle %s sautée : reset en cours", dongle_id
-            )
+        if self._reset_in_progress(dongle, dongle_id):
+            logger.info("Reconciliation dongle %s sautée : reset en cours", dongle_id)
             return
 
         # Récupération douce : un dongle bloqué (ERROR/OFFLINE) avec un
@@ -153,17 +167,7 @@ class ReconciliationWorker:
         # on tente une ré-énumération USB bornée avant la restauration.
         await self._attempt_usb_recovery(dongle)
 
-        # Ne PAS reconnecter si le dongle est déjà actif.
-        skip_connect = dongle.state in (DongleState.ONLINE, DongleState.CONNECTING)
-
-        if not skip_connect:
-            logger.info("Reconciliation dongle %s (état=%s)", dongle_id, dongle.state.value)
-            await self._restore_connection(dongle)
-            # connection_service.connect() charge et persiste sa propre copie ;
-            # recharger pour que la vérification voie le nouvel état.
-            refreshed = await self.dongle_repo.get_by_id(dongle_id)
-            if refreshed is not None:
-                dongle = refreshed
+        dongle = await self._restore_connection_if_needed(dongle)
 
         # (Re)pose des routes d'uplink SANS reconnexion AVANT le démarrage du
         # conteneur proxy : la route réelle ou le plancher de la table dédiée
@@ -172,6 +176,34 @@ class ReconciliationWorker:
         await self._repair_uplink_routes(dongle)
         await self.proxy_reconciler.restore_dongle_proxy(dongle)
         await self._verify_connectivity(dongle)
+
+    async def _restore_connection_if_needed(self, dongle: Dongle) -> Dongle:
+        """Restaure la connexion si le dongle n'est pas déjà actif.
+
+        Un dongle déjà actif (ONLINE/CONNECTING) n'est jamais reconnecté. Un
+        DEGRADED dont le bearer est encore vivant (IP du bearer présente sur
+        l'interface) non plus : connect() ferait flush_ipv4 + assign_address
+        et changerait l'IP de bearer à chaque cycle ; seules les routes sont
+        réparées ensuite, sans toucher au modem. Bearer mort/absent/IP périmée
+        → connect() comme avant.
+
+        Retourne le dongle, rechargé depuis le dépôt si connect() a tourné
+        (connect() charge et persiste sa propre copie).
+        """
+        if dongle.state in (DongleState.ONLINE, DongleState.CONNECTING):
+            return dongle
+        if dongle.state == DongleState.DEGRADED and await self.connection_service.bearer_is_live(dongle):
+            logger.info(
+                "Reconciliation dongle %s (DEGRADED, bearer vivant) : sans reconnexion",
+                dongle.id,
+            )
+            return dongle
+        logger.info("Reconciliation dongle %s (état=%s)", dongle.id, dongle.state.value)
+        await self._restore_connection(dongle)
+        # connection_service.connect() charge et persiste sa propre copie ;
+        # recharger pour que la vérification voie le nouvel état.
+        refreshed = await self.dongle_repo.get_by_id(dongle.id)
+        return refreshed if refreshed is not None else dongle
 
     async def _attempt_usb_recovery(self, dongle) -> None:
         """Délègue la récupération USB douce ; un échec ne casse pas le cycle."""
@@ -204,13 +236,19 @@ class ReconciliationWorker:
             logger.exception("Échec réparation routes uplink dongle %s", dongle.id)
 
     async def _verify_connectivity(self, dongle) -> None:
-        """Vérifie la connectivité et met à jour l'état."""
+        """Vérifie la connectivité et met à jour l'état (hystérésis DEGRADED).
+
+        Le verdict binaire « pas d'IP publique → DEGRADED » est remplacé par
+        l'arbitre tri-état (``services/connectivity_verdict.py``) : une sonde
+        faible unique ne marque plus DEGRADED, la sortie est immédiate dès
+        que l'IP publique revient.
+        """
         try:
             metrics = await self.connection_service.get_metrics(dongle.id)
             signal = metrics.signal_quality.percent if metrics.signal_quality else None
             self.metrics_snapshot.update(dongle.id, metrics.public_ip, signal)
-            target = DongleState.DEGRADED if metrics.public_ip is None else DongleState.ONLINE
-            if dongle.state != target and can_transition(dongle.state, target):
+            target = self.verdicts.assess(dongle.id, metrics)
+            if target is not None and dongle.state != target and can_transition(dongle.state, target):
                 dongle.change_state(target)
                 await self.dongle_repo.save(dongle)
         except Exception:

@@ -168,6 +168,34 @@ RESETTING ──(reconnect)──► CONNECTING
 > dongle déjà `ONLINE` (dont `connect()` est sauté) est détectée et réparée
 > au cycle suivant. C'est la même implémentation que `connect()`.
 
+> **Hystérésis asymétrique de `DEGRADED` :** la vérification de
+> connectivité de la reconciliation (`services/connectivity_verdict.py`,
+> arbitre pur `domain/degraded_arbiter.py`) décide de l'entrée/sortie de
+> `DEGRADED` à partir de verdicts **tri-état** des sondes (`OK` / `FAILED` /
+> `NOT_RUN` — `NOT_RUN` = pas d'IP source sur l'interface, sonde non
+> exécutable) :
+>
+> - **Sortie immédiate** : IP publique `OK` ⇒ retour à `ONLINE` au cycle
+>   suivant, quel que soit l'historique.
+> - **Entrée immédiate** : blackhole concordant (IP `FAILED` **et** ping
+>   != `OK`) ⇒ `DEGRADED` au cycle suivant, sans hystérésis.
+> - **Sinon** (`NOT_RUN`, ou IP `FAILED` avec ping `OK`) : échec faible ;
+>   `DEGRADED` seulement après `min_consecutive` échecs faibles consécutifs
+>   (paramètre du constructeur de `ReconciliationWorker`, défaut **2**). Le
+>   compteur est **en mémoire, par dongle** : un redémarrage du service le
+>   réinitialise.
+>
+> Un `DEGRADED` dont le **bearer est encore vivant** (IP du bearer présente
+> sur l'interface) ne déclenche plus `connect()` — qui ferait
+> `flush_ipv4` + `assign_address` et changerait l'IP de bearer à chaque
+> cycle : seules les routes d'uplink sont réparées. `connect()` n'est
+> relancé que si le bearer est mort, absent ou périmé.
+>
+> **Risque résiduel assumé** : l'état peut tarder d'un cycle sur un lien
+> intermittent ; l'isolation et le routage ne dépendent jamais de la sonde.
+> L'isolation réseau (nftables) et le routage (tables, fwmark, plancher)
+> sont (re)posés à chaque cycle indépendamment du verdict de connectivité.
+
 ### Récupération douce par ré-énumération USB
 
 Un dongle **enrôlé** bloqué en `ERROR` ou `OFFLINE` avec un bearer **PPP**

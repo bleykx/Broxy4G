@@ -167,6 +167,25 @@ class ConnectionService:
 
         return await self.connect(dongle_id)
 
+    async def bearer_is_live(self, dongle: Dongle) -> bool:
+        """Le bearer est-il toujours exploitable, sans reconnexion ?
+
+        Même critère que ``UplinkSession.wait_for_ip`` : l'IP du bearer doit
+        être non vide ET présente sur l'interface du modem. Toute exception
+        → ``False`` (échec sûr : on reconnecte plutôt que de sous-estimer).
+        """
+        try:
+            modem = await self._resolve_modem(dongle)
+            if modem is None or modem.interface_name is None:
+                return False
+            bearer = await self.modem.get_bearer_ip(modem.path)
+            if bearer is None or not bearer.address:
+                return False
+            return await self.iface.get_ip(modem.interface_name) == bearer.address
+        except Exception:
+            logger.warning("bearer_is_live indécidable pour dongle %s", dongle.id, exc_info=True)
+            return False
+
     async def get_metrics(self, dongle_id: UUID) -> DongleMetrics:
         return await self.diagnostics.get_metrics(dongle_id)
 
