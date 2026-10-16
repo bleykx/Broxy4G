@@ -86,3 +86,15 @@ class TestResetGet:
             "PENDING" in r.getMessage() and "reset déjà en cours" in r.getMessage()
             for r in caplog.records
         ), "la raison du PENDING doit être journalisée puisque le corps ne porte que le statut"
+
+    async def test_get_reset_within_cooldown_returns_pending(self, client, app, auth_headers):
+        """Garde anti-tempête : un 2e GET dans le cooldown (défaut 60 s) renvoie PENDING."""
+        dongle = await _enroll_online_via_app(app, "123456789012345", "wwan0", 10001, 1)
+
+        first = await client.get(f"/api/v1/dongles/{dongle.id}/reset", headers=auth_headers)
+        second = await client.get(f"/api/v1/dongles/{dongle.id}/reset", headers=auth_headers)
+
+        assert first.status_code == 200
+        assert first.text == "DONE"
+        assert second.status_code == 200
+        assert second.text == "PENDING"

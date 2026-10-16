@@ -130,6 +130,18 @@ proxy désactivé par l'opérateur le reste. Un reset en échec ou expiré laiss
 conteneur arrêté mais `enabled` à vrai — la réconciliation le restaure dès que
 l'uplink redevient utilisable. Aucun proxy n'est démarré sur un uplink mort.
 
+**Garde anti-tempête du reset** : un reset force une ré-énumération USB
+destructrice (~15-50 s de panne), donc les resets répétés du même dongle sont
+amortis par une garde par dongle (services/reset_throttle.py) : un **cooldown**
+minimal entre deux resets exécutés (défaut 60 s) et un **plafond** de resets par
+fenêtre glissante (défaut 5 / 600 s). Une demande dans le cooldown renvoie
+`PENDING` (message cooldown), un dépassement du plafond renvoie `ERROR`
+(message commençant par « reset refusé ») ; les statuts restent exactement
+`DONE` / `ERROR` / `PENDING`. Le refus est évalué **avant** la prise de verrou
+et ne touche **jamais** le matériel (pas de reset modem, pas de changement
+d'état du dongle) ; l'historique est en mémoire (un redémarrage du service le
+réinitialise).
+
 ONLINE    ──(reset)───► RESETTING
 DEGRADED  ──(reset)───► RESETTING
 OFFLINE   ──(reset)───► RESETTING

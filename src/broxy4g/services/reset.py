@@ -10,6 +10,7 @@ from broxy4g.repositories.proxy_repository import ProxyRepository
 from broxy4g.services.connection import ConnectionService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
+from broxy4g.services.reset_throttle import CAP, ResetThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,19 @@ logger = logging.getLogger(__name__)
 class ResetOutcome:
     status: str
     message: str | None = None
+
+
+def _throttled(reason: str, throttle: ResetThrottle) -> ResetOutcome:
+    """Statut métier d'un reset refusé par la garde anti-tempête (pas de matériel touché)."""
+    if reason == CAP:
+        return ResetOutcome(
+            "ERROR",
+            f"reset refusé : trop de resets rapprochés (max {throttle.max_per_window} par {throttle.window_seconds:g}s)",
+        )
+    return ResetOutcome(
+        "PENDING",
+        f"reset en cooldown : un reset récent (< {throttle.cooldown_seconds:g}s) est déjà appliqué",
+    )
 
 
 class ResetService:
@@ -30,6 +44,7 @@ class ResetService:
         lock: ResetLock,
         metrics_snapshot: MetricsSnapshot | None = None,
         reset_timeout: float = 300.0,
+        throttle: ResetThrottle | None = None,
     ):
         self.dongle_repo = dongle_repo
         self.proxy_repo = proxy_repo
@@ -38,12 +53,26 @@ class ResetService:
         self.lock = lock
         self.metrics_snapshot = metrics_snapshot
         self.reset_timeout = reset_timeout
+        self.throttle = throttle
 
     async def reset(self, dongle_id: UUID) -> ResetOutcome:
+        # Garde anti-tempête : le refus précède le verrou et ne touche pas le matériel.
+        key = str(dongle_id)
+        if self.throttle is not None:
+            reason = self.throttle.reject(key)
+            if reason is not None:
+                logger.info(
+                    "reset dongle %s refusé par la garde anti-tempête (%s)", dongle_id, reason
+                )
+                return _throttled(reason, self.throttle)
         try:
-            token = self.lock.acquire(str(dongle_id))
+            token = self.lock.acquire(key)
         except ResetInProgressError:
             return ResetOutcome("PENDING", "reset déjà en cours")
+
+        if self.throttle is not None:
+            # Le verrou est tenu : ce reset va réellement s'exécuter.
+            self.throttle.record(key)
 
         try:
             return await asyncio.wait_for(self._run_reset(dongle_id), timeout=self.reset_timeout)

@@ -365,6 +365,9 @@ docker buildx build --platform linux/arm64 -t broxy4g:local .
 | BROXY4G_HOST | Host to bind to | 0.0.0.0 |
 | BROXY4G_PORT | Port to listen on | 8080 |
 | BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS | Cross-cycle backoff (s) before soft USB re-enumeration of the same dongle is retried; in-memory only (a process restart allows one immediate attempt). Invalid or negative values fall back to the default | 300 |
+| BROXY4G_RESET_COOLDOWN_SECONDS | Minimum seconds between two executed resets of the same dongle (anti-storm guard); a request within the cooldown returns `PENDING`. Invalid or negative values fall back to the default | 60 |
+| BROXY4G_RESET_MAX_PER_WINDOW | Maximum resets per dongle per window (anti-storm guard); beyond the cap the reset is refused with `ERROR`. Invalid or negative values fall back to the default | 5 |
+| BROXY4G_RESET_WINDOW_SECONDS | Length in seconds of the sliding window used by the per-dongle reset cap. Invalid or negative values fall back to the default | 600 |
 | BROXY4G_ALLOW_QUERY_AUTH | Opt-in: allow API auth via query string (`?user=…&password=…`) for GET-only external tools; accepted values `1`/`true`/`yes`/`on` (case-insensitive) | false (fail-closed) |
 
 ## Security Notes

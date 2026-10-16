@@ -40,6 +40,7 @@ from broxy4g.services.proxy_listen import ProxyListenService
 from broxy4g.services.proxy_ports import PortAllocator
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.reset import ResetService
+from broxy4g.services.reset_throttle import ResetThrottle
 from broxy4g.services.routing_allocator import RoutingAllocator
 from broxy4g.services.uplink_routes import UplinkRouteService
 
@@ -191,6 +192,7 @@ def create_app(
         app.state.proxy_service,
         app.state.reset_lock,
         metrics_snapshot=app.state.metrics_snapshot,
+        throttle=ResetThrottle.from_env(),
     )
 
     app.include_router(health_router)

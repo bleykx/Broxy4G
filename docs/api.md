@@ -301,6 +301,16 @@ the per-dongle lock is always released on completion, timeout or cancellation.
   `UNENROLLED` or `CONFIGURING` (the reset needs an already-enrolled dongle).
   The message has the exact form `reset impossible dans l'état <STATE>`.
 
+**Anti-storm amortisation.** Because a reset forces a destructive USB
+re-enumeration (~15–50 s outage), repeated resets of the same dongle are
+amortised by a per-dongle guard (cooldown default `60 s`, cap default
+`5 resets / 600 s` window — configurable, see the deployment docs). A reset
+requested while a previous executed reset is younger than the cooldown returns
+`PENDING` with a cooldown message; a reset beyond the per-window cap returns
+`ERROR` with a message beginning with `reset refusé`. Refusals never touch the
+hardware. The status set stays exactly `DONE` / `ERROR` / `PENDING` (the GET
+`text/plain` body contract is unchanged).
+
 **GET variant.** `GET /api/v1/dongles/{id}/reset` is exposed for external
 GET-only tools (Ankabot) that can pass only a URL — combine it with the
 opt-in query string auth to trigger a reset with a single link.
