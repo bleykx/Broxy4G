@@ -1,4 +1,6 @@
 .git
+# Compose credentials live here (never bake them into a build context)
+.env
 .venv
 venv
 **/__pycache__

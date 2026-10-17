@@ -150,6 +150,9 @@ sudo cp deploy/broxy4g.service /etc/systemd/system/broxy4g.service
 sudo cp deploy/broxy4g.env.example /etc/broxy4g/broxy4g.env
 ```
 
+This file is read by the systemd unit only. The Docker deployment uses the
+project-root `.env` instead (see [Docker Setup](#docker-setup)).
+
 ### Enable and Start Service
 
 ```bash
@@ -160,29 +163,88 @@ sudo systemctl start broxy4g
 
 ## Docker Setup
 
+### Two deployment modes, two environment files
+
+The systemd and Docker deployments read **different** files, and mixing them up
+is the most common install error:
+
+| Mode | File actually read | Read by |
+|------|--------------------|---------|
+| systemd (`deploy/broxy4g.service`) | `/etc/broxy4g/broxy4g.env` | systemd, through `EnvironmentFile=` |
+| docker compose | `.env` at the repository root (or `--env-file <path>`) | the `docker compose` CLI, for `${…}` interpolation of `docker-compose.yml` |
+
+`docker compose` resolves `${BROXY4G_API_PASSWORD:?…}` **itself**, before the
+container exists, from the shell environment, the project-root `.env`, or
+`--env-file`. It never reads `/etc/broxy4g/broxy4g.env`, and an `env_file:`
+entry in a compose file cannot feed `${…}` interpolation either. This startup
+error therefore only means "compose was given no password":
+
+```text
+error while interpolating services.broxy4g.environment.[]: required variable
+BROXY4G_API_PASSWORD is missing a value: BROXY4G_API_PASSWORD must be set
+```
+
 ### Prerequisites
 
 - Docker must be **installed and running on the host**: Broxy4G manages the
   per-dongle 3proxy containers through the host Docker daemon
   (`/var/run/docker.sock` is mounted into the container). Without it, no proxy
   can ever be started.
-- The host data directory must exist, and the API password must be provided in
-  the environment (never hardcode it in `docker-compose.yml`):
+- The host data directory must exist:
 
 ```bash
 sudo mkdir -p /var/lib/broxy4g
-export BROXY4G_API_PASSWORD='a-long-random-password'
 ```
 
 ### Using docker compose
 
-```bash
-# Build and start the service
-docker compose build
-docker compose up -d
+Give the password to compose itself by creating the project-root `.env` (never
+hardcode it in `docker-compose.yml`):
 
-# View logs
-docker compose logs -f
+```bash
+cd <repository root>              # the directory holding docker-compose.yml
+cp deploy/docker.env.example .env
+chmod 600 .env
+$EDITOR .env                      # set a strong BROXY4G_API_PASSWORD
+```
+
+If Broxy4G is already installed for systemd on this host, that file can be
+reused verbatim — extra keys are read for interpolation only, they are not
+injected into the container:
+
+```bash
+sudo cp /etc/broxy4g/broxy4g.env .env
+sudo chown "$(id -u):$(id -g)" .env   # keep it readable by the user running compose
+chmod 600 .env
+```
+
+(A root-owned `0600` `.env` would make `docker compose` — run as a member of the
+`docker` group, without `sudo` — fail with the very same interpolation error.)
+
+Two equivalents, without touching the working tree:
+`export BROXY4G_API_PASSWORD='a-long-random-password'` before calling
+`docker compose`, or `docker compose --env-file /etc/broxy4g/broxy4g.env …`.
+A shell variable takes precedence over `.env`. Beware: `sudo` resets the
+environment, so prefer `--env-file` (or `sudo -E`) over `export` when running
+compose through `sudo`.
+
+The root `.env` is gitignored: never commit it.
+
+Then build and start:
+
+```bash
+docker compose up -d --build      # build and start
+docker compose logs -f            # view logs
+```
+
+The idempotent wrapper `deploy/docker-up.sh` performs the whole sequence:
+creates a missing `.env` (from `/etc/broxy4g/broxy4g.env` if present, otherwise
+from `deploy/docker.env.example`, mode `0600`), refuses the `change-me`
+placeholder, runs `docker compose up -d --build`, then waits for the public
+`/health` endpoint and prints the last log lines on failure:
+
+```bash
+sudo deploy/docker-up.sh
 ```
 
 The container runs `network_mode: host` (nftables, `ip rule` and the per-dongle
@@ -292,6 +354,10 @@ docker run -d --name broxy4g --privileged --network host \
 (`BROXY4G_HOST`, `BROXY4G_PORT` and `BROXY4G_FRONTEND_DIST` already have the
 right defaults baked into the image.)
 
+`$BROXY4G_API_PASSWORD` must be exported in the shell that runs this command
+(`set -a; . ./.env; set +a`); `docker run --env-file .env` is the direct
+equivalent of the compose `.env`.
+
 ### Soft USB Recovery — sysfs Write Prerequisite
 
 The reconciliation's **soft recovery** (bounded USB re-enumeration of a
@@ -378,6 +444,9 @@ docker buildx build --platform linux/arm64 -t broxy4g:local .
   `BROXY4G_API_PASSWORD`)
 - `BROXY4G_API_PASSWORD` must be set to a strong value (an empty password
   makes the API fail at startup)
+- In the Docker deployment the password lives in the project-root `.env`: keep
+  it at mode `0600` and never commit it (it is gitignored, and the Dockerfile
+  copies only explicit paths, so it is never baked into the image)
 - API endpoints should not be exposed to untrusted networks
 
 ### Capabilities and Permissions
