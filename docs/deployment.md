@@ -285,6 +285,29 @@ BROXY4G_API_PASSWORD is missing a value: BROXY4G_API_PASSWORD must be set
 sudo mkdir -p /var/lib/broxy4g
 ```
 
+### ADB prerequisites (smartphone dongles)
+
+The sections above ("ADB Setup") describe the **systemd** deployment; the
+Docker deployment has its own specifics:
+
+1. The image ships the `adb` binary (Debian `adb` package, installed by the
+   Dockerfile) and `BROXY4G_ADB_PATH` is baked in as `/usr/bin/adb` — nothing
+   to install on the host.
+2. The ADB server runs **inside the container** with `HOME=/var/lib/broxy4g`,
+   so the RSA key the phone must authorize is
+   `/var/lib/broxy4g/.android/adbkey` (generated on first `adb` run). That
+   directory is the bind-mounted data dir, so the key **survives container
+   recreation**: the "authorize this computer" prompt appears on the phone
+   once, and must be accepted on the phone's screen.
+3. Verify concretely: `docker compose exec broxy4g adb devices -l` must show
+   the phone in the `device` state — an `unauthorized` or `offline` phone is
+   silently ignored by discovery and will never appear in
+   `GET /api/v1/dongles/discovered`.
+4. Binary diagnostics: if the logs contain the WARNING "ADB indisponible …
+   le binaire adb est absent ou non autorisé", the `adb` binary is missing
+   from or not executable in the image (e.g. a custom image without the
+   package, or a wrong `BROXY4G_ADB_PATH`).
+
 ### Using docker compose
 
 Give the password to compose itself by creating the project-root `.env` (never
@@ -519,7 +542,7 @@ docker buildx build --platform linux/arm64 -t broxy4g:local .
 | BROXY4G_PROXY_HOST_IPS | Comma-separated host IPs to route through proxies | none |
 | BROXY4G_HOST | Host to bind to | 0.0.0.0 |
 | BROXY4G_PORT | Port to listen on | 8080 |
-| BROXY4G_ADB_PATH | Path of the `adb` binary used for smartphone dongles (transport `adb`). Must be reachable by the service (system-wide install — `ProtectHome=true` hides `/home`); an empty value falls back to the default | adb |
+| BROXY4G_ADB_PATH | Path of the `adb` binary used for smartphone dongles (transport `adb`). Must be reachable by the service (system-wide install — `ProtectHome=true` hides `/home`); an empty value falls back to the default. The Docker image sets it to `/usr/bin/adb` (Debian `adb` package shipped in the image) | adb |
 | BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS | Cross-cycle backoff (s) before soft USB re-enumeration of the same dongle is retried; in-memory only (a process restart allows one immediate attempt). Invalid or negative values fall back to the default | 300 |
 | BROXY4G_RESET_TIMEOUT_SECONDS | Bounded wall-clock timeout (s) of the whole reset operation (modem reset, reconnection, public-IP verification). The lock is released on timeout and the result is `ERROR`. Invalid or negative values fall back to the default | 300 |
 | BROXY4G_RESET_POST_DONE_SECONDS | Post-`DONE` grace window (s): a new reset of the same dongle inside the window returns `PENDING` (no hardware reset), so the operator is not disconnected right after obtaining their new public IP. In-memory only, distinct from the lock and the anti-storm throttle. Invalid or negative values fall back to the default | 15 |

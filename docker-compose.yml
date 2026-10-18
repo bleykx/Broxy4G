@@ -40,6 +40,9 @@ services:
       # Opt-in: allow API auth via query string (?user=…&password=…) for
       # GET-only external tools (e.g. Ankabot). Fail-closed by default.
       - BROXY4G_ALLOW_QUERY_AUTH=${BROXY4G_ALLOW_QUERY_AUTH:-false}
+      # Path of the `adb` binary inside the image (Debian `adb` package); the
+      # phone must be plugged in and the RSA prompt accepted (see docs).
+      - BROXY4G_ADB_PATH=${BROXY4G_ADB_PATH:-/usr/bin/adb}
       - HOME=/var/lib/broxy4g
     restart: unless-stopped
     healthcheck:

@@ -1,8 +1,11 @@
 """Tests RealAdb : FakeShell avec réponses ``ShellResult`` programmées."""
 
+import logging
+
 import pytest
 
-from broxy4g.adapters.adb import AdbDevice, FakeAdb, RealAdb
+from broxy4g.adapters.adb import AdbDevice, FakeAdb
+from broxy4g.adapters.adb_real import RealAdb
 from broxy4g.adapters.shell import FakeShell, ShellResult
 
 ADB = "adb"
@@ -49,6 +52,45 @@ async def test_list_devices_parses_real_adb_devices_l_output():
     )
     assert devices[1] == AdbDevice(serial="ABCD1234", state="offline")
     assert len(devices) == 2  # ligne daemon et en-tête ignorés
+
+
+@pytest.mark.asyncio
+async def test_list_devices_rc_nonzero_warns_once_per_instance(caplog):
+    """rc != 0 → liste vide + un seul WARNING par instance (pas de spam toutes les ~10 s)."""
+    shell = RecordingFakeShell()
+    shell.set_response(
+        [ADB, "devices", "-l"], ShellResult(returncode=127, stdout="", stderr="Command not found: adb")
+    )
+    adb = RealAdb(shell)
+    with caplog.at_level(logging.WARNING):
+        assert await adb.list_devices() == []
+        assert await adb.list_devices() == []
+    failures = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(failures) == 1
+    message = failures[0].getMessage()
+    assert ADB in message  # chemin du binaire utilisé
+    assert "127" in message  # code retour
+    assert "Command not found" in message  # extrait de stderr
+    assert "absent ou non autorisé" in message
+
+
+class RaisingFakeShell(FakeShell):
+    """Shell dont ``run`` lève ``OSError`` (binaire présent mais non autorisé)."""
+
+    async def run(self, command: list[str], timeout: float = 30.0) -> ShellResult:
+        raise PermissionError(13, "Operation not permitted", command[0])
+
+
+@pytest.mark.asyncio
+async def test_list_devices_oserror_returns_empty_and_warns_once(caplog):
+    """OSError du shell → liste vide (aucune exception) + un seul WARNING par instance."""
+    adb = RealAdb(RaisingFakeShell())
+    with caplog.at_level(logging.WARNING):
+        assert await adb.list_devices() == []
+        assert await adb.list_devices() == []
+    failures = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(failures) == 1
+    assert "PermissionError" in failures[0].getMessage()
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,5 @@
-from .adb import AdbAdapter, AdbDevice, FakeAdb, RealAdb
+from .adb import AdbAdapter, AdbDevice, FakeAdb
+from .adb_real import RealAdb
 from .connectivity import ConnectivityAdapter, FakeConnectivity, PingResult
 from .connectivity_real import RealConnectivity
 from .docker import DockerAdapter, FakeDocker

@@ -8,7 +8,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
-from broxy4g.adapters.adb import RealAdb
+from broxy4g.adapters.adb_real import RealAdb
 from broxy4g.adapters.connectivity_real import RealConnectivity
 from broxy4g.adapters.docker_compose import RealDockerCompose
 from broxy4g.adapters.docker_network import RealDockerNetwork

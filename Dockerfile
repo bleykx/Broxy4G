@@ -36,9 +36,11 @@ FROM python:3.11-slim AS runtime
 # curl: healthcheck and connectivity checks
 # iputils-ping: ICMP probe of the connectivity worker (curl TCP fallback
 #               already exists in the adapter if ping is unavailable)
+# adb: Android Debug Bridge binary, needed for smartphone dongles (transport
+#      `adb`); its path is made explicit via BROXY4G_ADB_PATH below
 # (NetworkManager is NOT installed: nmcli is not used inside the container)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    modemmanager nftables iproute2 curl ca-certificates iputils-ping \
+    modemmanager nftables iproute2 curl ca-certificates iputils-ping adb \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI and its plugins (docker-compose, docker-buildx)
@@ -59,6 +61,7 @@ COPY --from=frontend /app/frontend/dist/ /opt/broxy4g/frontend/dist
 ENV PYTHONUNBUFFERED=1 \
     BROXY4G_FRONTEND_DIST=/opt/broxy4g/frontend/dist \
     BROXY4G_DB_PATH=/var/lib/broxy4g/broxy4g.db \
+    BROXY4G_ADB_PATH=/usr/bin/adb \
     HOME=/var/lib/broxy4g
 
 EXPOSE 8080

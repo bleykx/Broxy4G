@@ -6,7 +6,7 @@ d'instance avec l'API), y compris le chemin ADB issu de BROXY4G_ADB_PATH.
 import asyncio
 import logging
 
-from broxy4g.adapters.adb import RealAdb
+from broxy4g.adapters.adb_real import RealAdb
 from broxy4g.adapters.connectivity_real import RealConnectivity
 from broxy4g.adapters.docker_network import RealDockerNetwork
 from broxy4g.adapters.modem_manager_real import RealModemManager
