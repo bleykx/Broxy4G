@@ -104,7 +104,7 @@ export const Dashboard: React.FC = () => {
             + Enroll eth/wifi
           </button>
           <button className="btn btn-primary" onClick={() => navigate('/dongles/new')}>
-            + Enroll Dongle
+            + Enroll Dongle / Phone
           </button>
         </div>
       </header>
@@ -131,9 +131,9 @@ export const Dashboard: React.FC = () => {
       ) : dongles.length === 0 ? (
         <div className="empty-state">
           <h2>No dongles enrolled</h2>
-          <p>Plug in a USB dongle and enroll it to get started.</p>
+          <p>Plug in a USB dongle or connect an Android phone, then enroll it to get started.</p>
           <button className="btn btn-primary" onClick={() => navigate('/dongles/new')}>
-            + Enroll Dongle
+            + Enroll Dongle / Phone
           </button>
         </div>
       ) : (

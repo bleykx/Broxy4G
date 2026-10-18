@@ -99,8 +99,8 @@ export const EnrollDonglePage: React.FC = () => {
           {loading && <p>Scanning for dongles and phones...</p>}
           {!loading && discovered.length === 0 && !error && (
             <div className="card" style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
-              No unenrolled dongle or phone detected. Plug in a USB dongle or connect an Android
-              phone with USB tethering, then refresh.
+              No unenrolled dongle or phone detected. Plug in a USB dongle, or connect an Android
+              phone over USB with USB debugging enabled (accept the RSA prompt), then refresh.
             </div>
           )}
           {!loading && error && selectedIndex === null && (
