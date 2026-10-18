@@ -217,10 +217,23 @@ L'adresse du bearer est fournie par **NetworkManager** (`nmcli`, profil
 - `ipv4.route-metric 21000` — métrique élevée, la route du profil n'est
   jamais privilégiée.
 
-Le **bail DHCP** (adresse + préfixe, lus sur l'interface, passerelle lue dans
-`nmcli -f DHCP4 con show`) est converti en configuration du bearer
-(`BearerIpConfig`, méthode `dhcp`) — exactement la même structure que celle
-qu'expose ModemManager pour un modem.
+Le **bail DHCP** (adresse + préfixe, passerelle lue dans `nmcli -f DHCP4 con
+show`) est converti en configuration du bearer (`BearerIpConfig`, méthode
+`dhcp`) — exactement la même structure que celle qu'expose ModemManager pour un
+modem.
+
+L'adresse est lue **scopée au profil** (`nmcli -g IP4.ADDRESS con show
+broxy4g-phone-<serial>`, `profile_ipv4`), jamais sur le device : la vue device
+mélange les ip-configs de **toutes** les connexions de l'interface (mesuré :
+`192.168.172.79/24 | 192.168.172.78/24` sur une seule ligne, l'ordre imprimé ne
+reflétant pas l'adresse source du noyau) et renvoie une adresse même quand
+notre profil n'est pas actif. Conséquence recherchée (fail-closed) : pas
+d'adresse sur **notre** profil → pas de bearer → le plancher anti-fuite est
+forcé, au lieu de construire la route et la règle source avec une adresse
+étrangère. Le parsing de ces sorties
+(`adapters/network_manager_cli_output.py`) ne lève **jamais** d'exception :
+multi-adresses, préfixe absent ou token parasite → première adresse valide ou
+`None`.
 
 ### Même table dédiée, mêmes artefacts
 
@@ -250,7 +263,11 @@ pointant vers sa propre netdev. C'est interdit ici : le filet de sécurité
 `guard_default_route` (`services/smartphone_uplink.py`) liste les routes par
 défaut de la table `main`, et si l'une d'elles passe par l'interface du
 téléphone, elle est **journalisée (ACTION ADMIN) et supprimée** — à chaque
-mise en ligne du profil.
+mise en ligne du profil **et à chaque cycle de réparation des routes d'uplink**
+(`services/uplink_routes.py::_apply_adb`). Mesuré en recette : une bascule
+NetworkManager (interface momentanément sans profil compatible) peut laisser
+une telle route plusieurs minutes après la mise en ligne ; le garde-fou appelé
+une seule fois ne l'a pas rattrapée.
 
 ## nftables Isolation
 
