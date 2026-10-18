@@ -53,7 +53,7 @@ async def test_bring_up_tethering_refused_raises(tmp_path):
 
 async def test_bring_up_nominal_returns_bearer_dhcp(tmp_path):
     nm = FakeNetworkManager()
-    nm.devices[IFACE] = NmIpv4("192.168.172.78", 24)
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
     nm.gateways[PROFILE] = "192.168.172.245"
     service = make_service(tmp_path, nm=nm)
 
@@ -75,7 +75,7 @@ async def test_bring_up_no_interface_raises(tmp_path):
 
 async def test_bring_up_removes_rogue_main_default_route(tmp_path, caplog):
     nm = FakeNetworkManager()
-    nm.devices[IFACE] = NmIpv4("192.168.172.78", 24)
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
     routing = FakeRouting()
     routing._default_routes.append(RoutingRoute(254, "default", "192.168.172.245", IFACE))
     service = make_service(tmp_path, nm=nm, routing=routing)
@@ -124,17 +124,19 @@ async def test_bring_down_never_raises_on_failures(tmp_path):
     await service.bring_down(SERIAL)  # profil inconnu : nm.down False, pas d'exception
 
 
-async def test_current_bearer_none_when_interface_unresolvable(tmp_path):
+async def test_current_bearer_none_when_profile_has_no_address(tmp_path):
+    """Fail-closed : une adresse sur le device (autre ip-config) ne fabrique
+    JAMAIS de bearer — l'appelant force alors le plancher."""
     nm = FakeNetworkManager()
-    nm.devices[IFACE] = NmIpv4("192.168.172.78", 24)
+    nm.devices[IFACE] = NmIpv4("192.168.172.78", 24)  # vue device seulement
     service = make_service(tmp_path, nm=nm)
 
-    assert await service.current_bearer("UNKNOWN") is None
+    assert await service.current_bearer(SERIAL) is None
 
 
 async def test_current_bearer_reads_state_without_side_effects(tmp_path):
     nm = FakeNetworkManager()
-    nm.devices[IFACE] = NmIpv4("192.168.172.78", 24)
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
     nm.gateways[PROFILE] = "192.168.172.245"
     adb = FakeAdb()
     service = make_service(tmp_path, adb=adb, nm=nm)
@@ -149,11 +151,21 @@ async def test_current_bearer_reads_state_without_side_effects(tmp_path):
 
 async def test_is_live_checks_exact_address(tmp_path):
     nm = FakeNetworkManager()
-    nm.devices[IFACE] = NmIpv4("192.168.172.78", 24)
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
     service = make_service(tmp_path, nm=nm)
 
     assert await service.is_live(SERIAL, "192.168.172.78") is True
     assert await service.is_live(SERIAL, "10.0.0.2") is False
+
+
+async def test_is_live_false_when_only_device_has_address(tmp_path):
+    """Vrai/faux selon l'adresse du PROFIL (et non du device) : une adresse
+    étrangère sur l'interface ne rend pas le uplink vivant."""
+    nm = FakeNetworkManager()
+    nm.devices[IFACE] = NmIpv4("192.168.172.78", 24)  # vue device seulement
+    service = make_service(tmp_path, nm=nm)
+
+    assert await service.is_live(SERIAL, "192.168.172.78") is False
 
 
 async def test_profile_name_sanitized(tmp_path):

@@ -60,7 +60,7 @@ def deps(
     fake_adb = FakeAdb()
     fake_adb.devices = [AdbDevice(serial=SERIAL, state="device")]
     nm = FakeNetworkManager()
-    nm.devices[IFACE] = NmIpv4(BEARER_IP, 24)
+    nm.profile_ips[PROFILE] = NmIpv4(BEARER_IP, 24)
     nm.gateways[PROFILE] = GATEWAY
     return SimpleNamespace(
         dongle_repo=dongle_repo, proxy_repo=proxy_repo, fake_modem=fake_modem,
@@ -220,7 +220,7 @@ async def test_adb_interface_renamed_in_sysfs_is_repersisted(deps, tmp_path):
     """(c) Le netdev RNDIS a été renommé dans sysfs : le nouveau nom est persisté
     et les routes/source sont reposées sur le NOUVEAU nom."""
     worker = build_adb_worker(deps, tmp_path, sysfs_iface=NEW_IFACE)
-    deps.nm.devices[NEW_IFACE] = NmIpv4(BEARER_IP, 24)
+    deps.nm.profile_ips[PROFILE] = NmIpv4(BEARER_IP, 24)  # le profil suit le serial, pas l'interface
     dongle = await make_adb_dongle(deps.dongle_repo, DongleState.ONLINE, interface_name=IFACE)
     deps.fake_iface.set_address(NEW_IFACE, BEARER_IP)
     deps.fake_connectivity.set_public_ip("5.6.7.8")

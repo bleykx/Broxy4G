@@ -92,7 +92,7 @@ class SmartphoneUplinkService:
             raise SmartphoneUplinkError(f"profil NetworkManager « {profile} » incorrect")
         if not await self.nm.up(profile):
             raise SmartphoneUplinkError(f"mise en ligne du profil « {profile} » impossible")
-        lease = await self._wait_lease(interface)
+        lease = await self._wait_lease(profile)
         if lease is None:
             raise SmartphoneUplinkError("adresse IP non attribuée au téléphone (DHCP)")
         await self.guard_default_route(interface)
@@ -103,13 +103,13 @@ class SmartphoneUplinkService:
             method="dhcp",
         )
 
-    async def _wait_lease(self, interface: str) -> NmIpv4 | None:
+    async def _wait_lease(self, profile: str) -> NmIpv4 | None:
         for _ in range(self.dhcp_wait_attempts):
-            lease = await self.nm.device_ipv4(interface)
+            lease = await self.nm.profile_ipv4(profile)
             if lease is not None:
                 return lease
             await asyncio.sleep(self.dhcp_wait_delay)
-        return await self.nm.device_ipv4(interface)
+        return await self.nm.profile_ipv4(profile)
 
     async def bring_down(self, serial: str) -> None:
         """Stop profil puis désactive le partage USB ; jamais d'exception transitoire."""
@@ -126,17 +126,20 @@ class SmartphoneUplinkService:
             logger.warning("uplink smartphone : erreur en désactivant le partage USB", exc_info=True)
 
     async def current_bearer(self, serial: str) -> BearerIpConfig | None:
-        """Bearer courant (lecture seule, sans activer le partage) ; ``None`` si indispo."""
-        interface = self.resolve_interface(serial)
-        if interface is None:
-            return None
-        lease = await self.nm.device_ipv4(interface)
+        """Bearer courant (lecture seule, sans activer le partage) ; ``None`` si indispo.
+
+        Scooping au profil (fail-closed) : une adresse sur le device qui n'appartient
+        pas à notre profil ne fabrique jamais de bearer — l'appelant force alors
+        le plancher au lieu de sourcer la route avec une adresse étrangère.
+        """
+        profile = self.profile_name(serial)
+        lease = await self.nm.profile_ipv4(profile)
         if lease is None:
             return None
         return BearerIpConfig(
             address=lease.address,
             prefix=lease.prefix,
-            gateway=await self.nm.dhcp_gateway(self.profile_name(serial)),
+            gateway=await self.nm.dhcp_gateway(profile),
             method="dhcp",
         )
 
@@ -154,9 +157,10 @@ class SmartphoneUplinkService:
             raise SmartphoneUplinkError(f"route par défaut de l'hôte détournée via {interface}")
 
     async def is_live(self, serial: str, address: str) -> bool:
-        """Vrai si l'interface résolue porte encore exactement ``address``."""
-        interface = self.resolve_interface(serial)
-        if interface is None:
-            return False
-        lease = await self.nm.device_ipv4(interface)
+        """Vrai si le profil du serial porte encore exactement ``address``.
+
+        Scooping au profil (fail-closed) : une adresse d'une autre connexion
+        sur l'interface ne compte pas comme vivante.
+        """
+        lease = await self.nm.profile_ipv4(self.profile_name(serial))
         return lease is not None and lease.address == address

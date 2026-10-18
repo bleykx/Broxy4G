@@ -24,6 +24,14 @@ def verify_cmd() -> list[str]:
     return ["nmcli", "-g", _VERIFY_FIELDS, "con", "show", NAME]
 
 
+def device_show_cmd() -> list[str]:
+    return ["nmcli", "-g", "IP4.ADDRESS", "device", "show", IFACE]
+
+
+def profile_show_cmd() -> list[str]:
+    return ["nmcli", "-g", "IP4.ADDRESS", "con", "show", NAME]
+
+
 def verify_out(metric: int = PROFILE_METRIC, interface: str = IFACE) -> str:
     return f"auto\nyes\ndisabled\n{metric}\nyes\n{interface}\n"
 
@@ -94,20 +102,101 @@ async def test_device_ipv4_parses_address_with_prefix():
     assert await RealNetworkManager(shell).device_ipv4(IFACE) == NmIpv4("192.168.172.78", 24)
 
 
+async def test_device_ipv4_multi_address_pipe_no_exception():
+    """Non-régression du défaut mesuré (Pi) : la sortie
+    ``192.168.172.79/24 | 192.168.172.78/24`` ne doit JAMAIS lever —
+    l'ancienne lecture faisait ``int("24 | 192.168.172.78/24")`` → ``ValueError``.
+    Première adresse imprimée renvoyée (l'ordre du noyau n'est pas fiable).
+    """
+    shell = RecordingShell()
+    shell.set_response(
+        device_show_cmd(),
+        ShellResult(0, "192.168.172.79/24 | 192.168.172.78/24\n", ""),
+    )
+
+    assert await RealNetworkManager(shell).device_ipv4(IFACE) == NmIpv4("192.168.172.79", 24)
+
+
+async def test_device_ipv4_multi_address_variable_spacing():
+    shell = RecordingShell()
+    shell.set_response(
+        device_show_cmd(),
+        ShellResult(0, "  192.168.172.79/24  |   192.168.172.78/24 \n", ""),
+    )
+
+    assert await RealNetworkManager(shell).device_ipv4(IFACE) == NmIpv4("192.168.172.79", 24)
+
+
+async def test_device_ipv4_three_addresses_first_wins():
+    shell = RecordingShell()
+    shell.set_response(
+        device_show_cmd(),
+        ShellResult(0, "10.9.0.2/24 | 192.168.172.79/24 | 192.168.172.78/24\n", ""),
+    )
+
+    assert await RealNetworkManager(shell).device_ipv4(IFACE) == NmIpv4("10.9.0.2", 24)
+
+
 async def test_device_ipv4_tolerates_missing_prefix():
     shell = RecordingShell()
     shell.set_response(
-        ["nmcli", "-g", "IP4.ADDRESS", "device", "show", IFACE],
+        device_show_cmd(),
         ShellResult(0, "192.168.172.78\n", ""),
     )
 
     assert await RealNetworkManager(shell).device_ipv4(IFACE) == NmIpv4("192.168.172.78", 0)
 
 
+async def test_device_ipv4_multi_address_missing_prefix_first():
+    shell = RecordingShell()
+    shell.set_response(
+        device_show_cmd(),
+        ShellResult(0, "192.168.172.78 | 10.0.0.2/16\n", ""),
+    )
+
+    assert await RealNetworkManager(shell).device_ipv4(IFACE) == NmIpv4("192.168.172.78", 0)
+
+
+async def test_device_ipv4_empty_output_none():
+    shell = RecordingShell()
+    shell.set_response(device_show_cmd(), ShellResult(0, "", ""))
+
+    assert await RealNetworkManager(shell).device_ipv4(IFACE) is None
+
+
+async def test_device_ipv4_garbage_output_none_without_exception():
+    shell = RecordingShell()
+    shell.set_response(device_show_cmd(), ShellResult(0, "abc\n", ""))
+
+    assert await RealNetworkManager(shell).device_ipv4(IFACE) is None
+
+
 async def test_device_ipv4_none_when_device_missing():
     shell = RecordingShell()
 
     assert await RealNetworkManager(shell).device_ipv4(IFACE) is None
+
+
+async def test_profile_ipv4_exact_argv_first_address():
+    """argv exact (même style que ``dhcp_gateway``) ; même sortie mesurée multi-adresses."""
+    shell = RecordingShell()
+    shell.set_response(
+        profile_show_cmd(),
+        ShellResult(0, "192.168.172.79/24 | 192.168.172.78/24\n", ""),
+    )
+
+    manager = RealNetworkManager(shell)
+    assert await manager.profile_ipv4(NAME) == NmIpv4("192.168.172.79", 24)
+    assert shell.calls == [profile_show_cmd()]
+
+
+async def test_profile_ipv4_none_when_rc_nonzero():
+    shell = RecordingShell()
+    shell.set_response(
+        profile_show_cmd(), ShellResult(1, "", "Error: connection not found")
+    )
+
+    assert await RealNetworkManager(shell).profile_ipv4(NAME) is None
 
 
 async def test_dhcp_gateway_extracts_routers_option():

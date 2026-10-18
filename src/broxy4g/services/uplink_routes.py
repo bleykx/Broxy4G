@@ -96,6 +96,12 @@ class UplinkRouteService:
         téléphone introuvable → plancher NON forcé (une route réelle pré-existante
         n'est jamais dégradée). Bearer ``None`` (pas de bail DHCP) : ``apply_bearer``
         force le plancher, son adresse étant la source de la route.
+
+        Filet de sécurité : une route par défaut de la table ``main`` via
+        l'interface du téléphone a survécu plusieurs minutes après un
+        ``bring_up`` en recette réelle (``guard_default_route`` n'y est appelé
+        qu'une fois) — la réparation périodique est donc aussi appelée à
+        l'éliminer.
         """
         if dongle.state not in ACTIVE_INTERFACE_STATES:
             await self.apply_barrier(dongle, force=True)
@@ -116,6 +122,7 @@ class UplinkRouteService:
             return
         bearer = await self.smartphone.current_bearer(serial)
         await self.apply_bearer(dongle, bearer, interface)
+        await self.smartphone.guard_default_route(interface)
 
     async def apply_bearer(
         self, dongle: Dongle, bearer: BearerIpConfig | None, interface_name: str | None

@@ -6,6 +6,8 @@ le chemin modem reste intact.
 
 import logging
 
+import pytest
+
 from broxy4g.adapters.adb import FakeAdb
 from broxy4g.adapters.modem_manager import FakeModemManager
 from broxy4g.adapters.net_interface import FakeInterface
@@ -15,7 +17,7 @@ from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.domain.transport import Transport
-from broxy4g.services.smartphone_uplink import SmartphoneUplinkService
+from broxy4g.services.smartphone_uplink import SmartphoneUplinkError, SmartphoneUplinkService
 from broxy4g.services.uplink_routes import UplinkRouteService
 
 SERIAL = "ABC123"
@@ -47,9 +49,12 @@ def make_sysfs(tmp_path, serial: str = SERIAL, iface: str = IFACE) -> str:
     return str(root)
 
 
-def make_uplink(tmp_path, nm: FakeNetworkManager | None = None) -> SmartphoneUplinkService:
+def make_uplink(
+    tmp_path, nm: FakeNetworkManager | None = None, routing: FakeRouting | None = None
+) -> SmartphoneUplinkService:
     return SmartphoneUplinkService(
-        FakeAdb(), nm or FakeNetworkManager(), FakeInterface(), FakeRouting(),
+        FakeAdb(), nm or FakeNetworkManager(), FakeInterface(),
+        routing if routing is not None else FakeRouting(),
         sysfs_root=make_sysfs(tmp_path),
         iface_wait_attempts=2, iface_wait_delay=0.0,
         dhcp_wait_attempts=2, dhcp_wait_delay=0.0,
@@ -76,7 +81,7 @@ def seed_real_route(routing: CountingRouting) -> None:
 
 async def test_adb_online_applies_bearer_and_resolved_interface(tmp_path, caplog):
     nm = FakeNetworkManager()
-    nm.devices[IFACE] = NmIpv4("192.168.172.78", 24)
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
     nm.gateways[PROFILE] = "192.168.172.245"
     routing = CountingRouting()
     service = UplinkRouteService(FakeModemManager(), routing, smartphone=make_uplink(tmp_path, nm))
@@ -136,3 +141,45 @@ async def test_adb_online_without_lease_forces_floor(tmp_path):
     assert [(r.dest, r.type) for r in await routing.list_routes(10001)] == [
         ("default", "unreachable"),
     ]
+
+
+async def test_adb_repair_removes_rogue_main_default_route(tmp_path):
+    """Filet de sécurité : la réparation périodique élimine aussi une route
+    par défaut de la table ``main`` via l'interface du téléphone (mesurée en
+    recette réelle : elle survivait plusieurs minutes, ``guard_default_route``
+    n'étant appelé qu'au ``bring_up``). Le test échoue si l'appel est retiré
+    de ``_apply_adb``."""
+    nm = FakeNetworkManager()
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
+    nm.gateways[PROFILE] = "192.168.172.245"
+    routing = CountingRouting()
+    routing._default_routes.append(RoutingRoute(254, "default", "192.168.172.245", IFACE))
+    service = UplinkRouteService(
+        FakeModemManager(), routing, smartphone=make_uplink(tmp_path, nm, routing=routing)
+    )
+
+    await service.apply_for_dongle(make_dongle(DongleState.ONLINE))
+
+    assert await routing.list_default_routes() == []  # la route parasite est partie
+    assert [(r.dest, r.via, r.dev, r.type) for r in await routing.list_routes(10001)] == [
+        ("default", "192.168.172.245", IFACE, "unicast"),
+    ]
+
+
+async def test_adb_repair_rogue_default_route_still_present_raises(tmp_path):
+    """Route ``main`` qui survit à la suppression : exception métier (comme au
+    ``bring_up``), propagée au worker de réparation."""
+    class StubbornRouting(CountingRouting):
+        async def remove_default_route(self, dev: str) -> bool:
+            return False  # la route revient toujours
+
+    nm = FakeNetworkManager()
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
+    routing = StubbornRouting()
+    routing._default_routes.append(RoutingRoute(254, "default", "192.168.172.245", IFACE))
+    service = UplinkRouteService(
+        FakeModemManager(), routing, smartphone=make_uplink(tmp_path, nm, routing=routing)
+    )
+
+    with pytest.raises(SmartphoneUplinkError, match="route par défaut de l'hôte détournée"):
+        await service.apply_for_dongle(make_dongle(DongleState.ONLINE))

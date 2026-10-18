@@ -13,8 +13,11 @@ Facts mesurés sur hôte réel :
   fonctionne des deux côtés du décalage de versions.
 - La passerelle DHCP se lit dans ``nmcli -f DHCP4 con show <name>``
   (``DHCP4.OPTION[27]:  routers = 192.168.172.245``), pas dans ``IP4.GATEWAY``.
-- L'adresse runtime se lit avec ``nmcli -g IP4.ADDRESS device show <if>``
-  (``192.168.172.78/24``), le profil ``con show`` n'a pas de section IP4.
+- L'adresse du profil (scope, fail-closed du chemin smartphone) se lit avec
+  ``nmcli -g IP4.ADDRESS con show <name>``. La vue device
+  (``device show <if>``) reste disponible mais mélange les adresses de toutes
+  les ip-configs du device, multi-adresses comprises : le parsing robuste
+  (jamais d'exception) est dans ``network_manager_cli_output``.
 
 Toutes les commandes passent par ``ShellAdapter`` (jamais de ``subprocess``).
 """
@@ -22,10 +25,13 @@ Toutes les commandes passent par ``ShellAdapter`` (jamais de ``subprocess``).
 from __future__ import annotations
 
 import logging
-import re
-from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from .network_manager_cli_output import (
+    NmIpv4,
+    parse_dhcp_gateway,
+    parse_ipv4_address,
+)
 from .shell import ShellAdapter, ShellResult
 
 logger = logging.getLogger(__name__)
@@ -34,13 +40,6 @@ logger = logging.getLogger(__name__)
 PROFILE_METRIC = 21000
 
 _VERIFY_FIELDS = "ipv4.method,ipv4.never-default,ipv6.method,ipv4.route-metric,connection.autoconnect,connection.interface-name"
-_ROUTERS_RE = re.compile(r"\brouters\s*=\s*(\S+)")
-
-
-@dataclass(frozen=True)
-class NmIpv4:
-    address: str
-    prefix: int
 
 
 @runtime_checkable
@@ -61,6 +60,9 @@ class NetworkManagerAdapter(Protocol):
         ...
 
     async def device_ipv4(self, interface: str) -> NmIpv4 | None:
+        ...
+
+    async def profile_ipv4(self, name: str) -> NmIpv4 | None:
         ...
 
     async def dhcp_gateway(self, name: str) -> str | None:
@@ -157,30 +159,37 @@ class RealNetworkManager:
         return (await self._run([self.nmcli, "con", "delete", name])).returncode == 0
 
     async def device_ipv4(self, interface: str) -> NmIpv4 | None:
-        """Première adresse de ``nmcli -g IP4.ADDRESS device show <if>`` (``addr/prefix``)."""
+        """Première adresse du device, toutes ip-configs confondues (``addr/prefix``).
+
+        Vue device de ``nmcli -g IP4.ADDRESS device show <if>`` : mélange les
+        adresses de toutes les connexions du device (notre bail et résiduelles),
+        multi-adresses comprises, et l'ordre imprimé n'est pas celui du noyau.
+        Parsing robuste (jamais d'exception) : ``None`` si aucune adresse.
+        """
         result = await self._run([self.nmcli, "-g", "IP4.ADDRESS", "device", "show", interface])
         if result.returncode != 0:
             return None
-        for line in result.stdout.splitlines():
-            value = line.strip()
-            if not value:
-                continue
-            address, _, prefix = value.partition("/")
-            if not address:
-                continue
-            return NmIpv4(address=address, prefix=int(prefix) if prefix else 0)
-        return None
+        return parse_ipv4_address(result.stdout)
+
+    async def profile_ipv4(self, name: str) -> NmIpv4 | None:
+        """Adresse IPv4 du profil (``addr/prefix``) ; ``None`` s'il n'a pas de bail.
+
+        Scooping au profil de ``nmcli -g IP4.ADDRESS con show <name>`` : ne
+        renvoie JAMAIS l'adresse d'une autre (ou résiduelle) connexion du
+        device — c'est la lecture du chemin smartphone (fail-closed : pas
+        d'adresse → l'appelant force le plancher).
+        """
+        result = await self._run([self.nmcli, "-g", "IP4.ADDRESS", "con", "show", name])
+        if result.returncode != 0:
+            return None
+        return parse_ipv4_address(result.stdout)
 
     async def dhcp_gateway(self, name: str) -> str | None:
         """Première passerelle de ``nmcli -f DHCP4 con show <name>`` (``routers = <ip>``)."""
         result = await self._run([self.nmcli, "-f", "DHCP4", "con", "show", name])
         if result.returncode != 0:
             return None
-        for line in result.stdout.splitlines():
-            match = _ROUTERS_RE.search(line)
-            if match:
-                return match.group(1)
-        return None
+        return parse_dhcp_gateway(result.stdout)
 
 
 class FakeNetworkManager:
@@ -189,6 +198,7 @@ class FakeNetworkManager:
     def __init__(self):
         self.profiles: dict[str, dict] = {}
         self.devices: dict[str, NmIpv4] = {}
+        self.profile_ips: dict[str, NmIpv4] = {}
         self.gateways: dict[str, str] = {}
         self.calls: list[list[str]] = []
         self.up_result: bool = True
@@ -223,6 +233,9 @@ class FakeNetworkManager:
 
     async def device_ipv4(self, interface: str) -> NmIpv4 | None:
         return self.devices.get(interface)
+
+    async def profile_ipv4(self, name: str) -> NmIpv4 | None:
+        return self.profile_ips.get(name)
 
     async def dhcp_gateway(self, name: str) -> str | None:
         return self.gateways.get(name)

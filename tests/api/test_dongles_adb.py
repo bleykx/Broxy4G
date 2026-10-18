@@ -33,7 +33,7 @@ def _fast_smartphone_uplink(app, tmp_path: Path) -> None:
     app.state.smartphone_uplink.iface_wait_delay = 0.0
     app.state.smartphone_uplink.dhcp_wait_attempts = 3
     app.state.smartphone_uplink.dhcp_wait_delay = 0.0
-    app.state.nm.devices[IFACE] = NmIpv4(address="192.168.172.78", prefix=24)
+    app.state.nm.profile_ips[f"broxy4g-phone-{SERIAL}"] = NmIpv4(address="192.168.172.78", prefix=24)
 
 
 async def test_enroll_adb_phone_succeeds(client, app, auth_headers, tmp_path):

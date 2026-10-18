@@ -133,7 +133,7 @@ def make_connection(tmp_path, dongle_repo, routing_allocator, isolation,
     adb = OrderingAdb(events)
     adb.devices = [AdbDevice(serial=serial, state="device")]
     nm = OrderingNm(events)
-    nm.devices[IFACE] = NmIpv4(BEARER_IP, 24)
+    nm.profile_ips[profile] = NmIpv4(BEARER_IP, 24)
     nm.gateways[profile] = GATEWAY
     iface = FakeInterface()
     iface.set_address(IFACE, BEARER_IP)

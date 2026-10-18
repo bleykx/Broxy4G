@@ -102,7 +102,7 @@ def make_service(
 
 def make_nm_with_lease() -> FakeNetworkManager:
     nm = FakeNetworkManager()
-    nm.devices[IFACE] = NmIpv4(BEARER_IP, 24)
+    nm.profile_ips[PROFILE] = NmIpv4(BEARER_IP, 24)
     nm.gateways[PROFILE] = "192.168.172.245"
     return nm
 
