@@ -28,6 +28,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Host system D-Bus: mmcli talks to the host's ModemManager
       - /run/dbus:/run/dbus
+      # `privileged: true` is NOT enough: Docker builds the container's /dev
+      # snapshot at container creation, so a USB device enumerated later
+      # (new device number) stays invisible. Binding the host's
+      # /dev/bus/usb makes hotplug visible — required for ADB phones plugged
+      # after container start and for reconciliation after unplug/plug.
+      # No :ro: libusb must open the nodes to perform control transfers.
+      - /dev/bus/usb:/dev/bus/usb
     environment:
       - BROXY4G_API_USER=${BROXY4G_API_USER:-admin}
       # Required: an empty password makes the API return HTTP 500

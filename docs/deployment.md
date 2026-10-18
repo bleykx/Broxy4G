@@ -307,6 +307,13 @@ Docker deployment has its own specifics:
    le binaire adb est absent ou non autorisé", the `adb` binary is missing
    from or not executable in the image (e.g. a custom image without the
    package, or a wrong `BROXY4G_ADB_PATH`).
+5. The container bind-mounts the host's `/dev/bus/usb` (Docker snapshots
+   `/dev` at container creation, so a phone plugged in **after** the container
+   started would otherwise stay invisible). Diagnostic: if
+   `docker compose exec broxy4g adb devices -l` is empty while `lsusb` on the
+   host shows the phone, compare `ls /dev/bus/usb/001/` on the host and inside
+   the container — the container must list the same device number; if it does
+   not, the mount is missing (recreate the container: `docker compose up -d`).
 
 ### Using docker compose
 
