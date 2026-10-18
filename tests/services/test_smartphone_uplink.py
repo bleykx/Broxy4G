@@ -13,6 +13,7 @@ from broxy4g.services.smartphone_uplink import SmartphoneUplinkError, Smartphone
 
 SERIAL = "ABC123"
 IFACE = "enx02360c7c147a"
+MAC = "02:36:0c:7c:14:7a"
 PROFILE = f"broxy4g-phone-{SERIAL}"
 
 
@@ -57,6 +58,7 @@ async def test_bring_up_nominal_returns_bearer_dhcp(tmp_path):
     nm.gateways[PROFILE] = "192.168.172.245"
     iface = FakeInterface()
     iface.set_addresses(IFACE, [("192.168.172.78", 24, False)])  # vérité noyau attendue
+    iface.set_mac(IFACE, MAC)  # MAC lue dans sysfs → profil lié par identité matérielle
     service = make_service(tmp_path, nm=nm, iface=iface)
 
     bearer = await service.bring_up(SERIAL)
@@ -64,8 +66,30 @@ async def test_bring_up_nominal_returns_bearer_dhcp(tmp_path):
     assert bearer == BearerIpConfig(
         address="192.168.172.78", prefix=24, gateway="192.168.172.245", method="dhcp"
     )
-    assert ["ensure_profile", IFACE, PROFILE, "21000"] in nm.calls
+    assert ["ensure_profile", IFACE, MAC, PROFILE, "21000"] in nm.calls
+    # Suppression des connexions NM étrangères, appelée juste après
+    # ensure_profile (avant la mise en ligne du profil).
+    assert ["remove_foreign", IFACE, MAC, PROFILE] in nm.calls
+    assert nm.calls.index(["remove_foreign", IFACE, MAC, PROFILE]) > nm.calls.index(
+        ["ensure_profile", IFACE, MAC, PROFILE, "21000"]
+    )
     assert ["up", PROFILE] in nm.calls
+
+
+async def test_bring_up_falls_back_to_interface_binding_when_mac_unreadable(tmp_path):
+    """MAC illisible (aucune entrée sysfs) : ensure_profile reçoit ``None``
+    (repli sur le nom d'interface côté adaptateur), jamais d'exception."""
+    nm = FakeNetworkManager()
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
+    iface = FakeInterface()  # pas de MAC
+    iface.set_addresses(IFACE, [("192.168.172.78", 24, False)])
+    service = make_service(tmp_path, nm=nm, iface=iface)
+
+    bearer = await service.bring_up(SERIAL)
+
+    assert bearer is not None
+    assert ["ensure_profile", IFACE, None, PROFILE, "21000"] in nm.calls
+    assert ["remove_foreign", IFACE, None, PROFILE] in nm.calls
 
 
 async def test_bring_up_no_interface_raises(tmp_path):
@@ -109,7 +133,7 @@ async def test_bring_down_stops_profile_and_tethering(tmp_path):
     nm = FakeNetworkManager()
     adb = FakeAdb()
     service = make_service(tmp_path, adb=adb, nm=nm)
-    await service.nm.ensure_profile(IFACE, PROFILE)
+    await service.nm.ensure_profile(IFACE, MAC, PROFILE)
 
     await service.bring_down(SERIAL)
 

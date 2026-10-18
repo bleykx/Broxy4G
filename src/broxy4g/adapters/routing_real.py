@@ -12,6 +12,11 @@ _DEFAULT_ROUTE_RE = re.compile(r"^default(?:\s+via\s+(?P<via>\S+))?\s+dev\s+(?P<
 # "prohibit default") — sans dev, _DEFAULT_ROUTE_RE ne le verrait pas.
 _BARRIER_ROUTE_RE = re.compile(r"^(?P<type>unreachable|blackhole|prohibit)\s+default\b")
 
+# Attributs déposés par un acteur étranger (ex. NetworkManager) : notre writer
+# n'en écrit jamais. Leurs valeurs signalent une route par défaut étrangère.
+_PROTO_RE = re.compile(r"\bproto\s+(\S+)")
+_SRC_RE = re.compile(r"\bsrc\s+(\S+)")
+
 
 class RealRouting:
     def __init__(self, shell: ShellAdapter):
@@ -158,10 +163,14 @@ class RealRouting:
                 # Routes non-default (ex. "10.159.56.32/27 dev dongle-1336
                 # proto kernel scope link src 10.159.56.48") : ignorées.
                 continue
+            proto = _PROTO_RE.search(line)
+            src = _SRC_RE.search(line)
             routes.append(RoutingRoute(
                 table_id=table_id,
                 dest="default",
                 via=match.group("via"),
                 dev=match.group("dev"),
+                src=src.group(1) if src else None,
+                proto=proto.group(1) if proto else None,
             ))
         return routes

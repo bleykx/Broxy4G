@@ -31,6 +31,7 @@ from broxy4g.services.uplink_routes import UplinkRouteService
 
 SERIAL = "ABC123"
 IFACE = "enx02360c7c147a"
+MAC = "02:36:0c:7c:14:7a"
 PROFILE = f"broxy4g-phone-{SERIAL}"
 BEARER_IP = "192.168.172.78"
 GATEWAY = "192.168.172.245"
@@ -179,7 +180,7 @@ async def test_reset_adb_nominal_done_probe_late_then_ok(
     connection, adb, nm = make_connection(
         tmp_path, dongle_repo, routing_allocator, isolation, fake_nft, connectivity, events
     )
-    await nm.ensure_profile(IFACE, PROFILE)  # profil existant : le reset peut libérer le bail
+    await nm.ensure_profile(IFACE, MAC, PROFILE)  # profil existant : le reset peut libérer le bail
     dongle = await make_phone(dongle_repo)
 
     # (g) session data inconnue pour un téléphone, avant le reset, sans exception.
@@ -213,7 +214,7 @@ async def test_reset_adb_probe_never_ok_error_stays_online(
     connection, adb, nm = make_connection(
         tmp_path, dongle_repo, routing_allocator, isolation, fake_nft, connectivity, events
     )
-    await nm.ensure_profile(IFACE, PROFILE)
+    await nm.ensure_profile(IFACE, MAC, PROFILE)
     dongle = await make_phone(dongle_repo)
 
     svc = make_reset(dongle_repo, proxy_repo, connection, proxy_service, fake_reset_lock, metrics_snapshot)
@@ -252,7 +253,7 @@ async def test_reset_adb_post_done_window_pending_and_refusal_does_not_rearm(
         tmp_path, dongle_repo, routing_allocator, isolation, fake_nft, fake_connectivity, events
     )
     fake_connectivity.set_public_ip("10.64.0.1")
-    await nm.ensure_profile(IFACE, PROFILE)
+    await nm.ensure_profile(IFACE, MAC, PROFILE)
     phone = await make_phone(dongle_repo)
     other = await make_phone(dongle_repo, state=DongleState.DISCOVERED, serial="DEF456")
     clock = ControllableClock()
@@ -302,7 +303,7 @@ async def test_reset_adb_lock_released_on_timeout(
     connection, adb, nm = make_connection(
         tmp_path, dongle_repo, routing_allocator, isolation, fake_nft, fake_connectivity, events
     )
-    await nm.ensure_profile(IFACE, PROFILE)
+    await nm.ensure_profile(IFACE, MAC, PROFILE)
     dongle = await make_phone(dongle_repo)
 
     async def blocking_reset(dongle_id):
@@ -330,7 +331,7 @@ async def test_reset_adb_lock_released_on_exception(
     connection, adb, nm = make_connection(
         tmp_path, dongle_repo, routing_allocator, isolation, fake_nft, fake_connectivity, events
     )
-    await nm.ensure_profile(IFACE, PROFILE)
+    await nm.ensure_profile(IFACE, MAC, PROFILE)
     dongle = await make_phone(dongle_repo)
 
     svc = make_reset(dongle_repo, proxy_repo, connection, proxy_service, fake_reset_lock)
@@ -388,7 +389,7 @@ async def test_reset_adb_only_identity_survives_repository_round_trip(
         tmp_path, dongle_repo, routing_allocator, isolation, fake_nft, connectivity, events,
         serial=serial,
     )
-    await nm.ensure_profile(IFACE, profile)
+    await nm.ensure_profile(IFACE, MAC, profile)
     phone = await make_phone(dongle_repo, state=DongleState.CONFIGURING, serial=serial, adb_only=True)
 
     # L'identité ADB-only survit à la lecture de la base (le défaut corrigé).

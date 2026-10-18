@@ -17,7 +17,7 @@ le proxy du dongle fuit par eth. Quand aucune route réelle ne peut être posée
 import logging
 
 from broxy4g.adapters.modem_manager import BearerIpConfig
-from broxy4g.adapters.routing import RoutingAdapter, RoutingRule
+from broxy4g.adapters.routing import RoutingAdapter, RoutingRoute, RoutingRule
 from broxy4g.domain.dongle import Dongle
 
 logger = logging.getLogger(__name__)
@@ -100,13 +100,56 @@ class UplinkRouteWriter:
 
         L'idempotence compare la route RÉELLE (type ``"unicast"``) : un
         plancher présent dans la table est remplacé par la route réelle.
+        Une route ``default`` écrite par un autre acteur (ex. NetworkManager,
+        reconnaissable à ``proto``/``src``) est TOUJOURS remplacée : c'est la
+        frontière d'isolation du dongle.
         """
         desired_via = bearer.gateway or None
         routes = await self.routing.list_routes(table_id)
         existing = next((r for r in routes if r.dest == "default" and r.type == "unicast"), None)
-        if existing is not None and existing.dev == interface_name and existing.via == desired_via:
+        if (
+            existing is not None
+            and existing.dev == interface_name
+            and existing.via == desired_via
+            and not self._route_is_foreign(existing, bearer)
+        ):
             return
-        if desired_via is None:
+        self._log_route_repair(
+            dongle, table_id, bearer, interface_name, desired_via, existing, routes
+        )
+        await self.routing.add_route(table_id, "default", desired_via, interface_name)
+
+    @staticmethod
+    def _route_is_foreign(existing: RoutingRoute, bearer: BearerIpConfig) -> bool:
+        """Vrai si la route n'a PAS été écrite par ce writer (ex. NetworkManager) :
+
+        notre writer ne pose jamais de ``proto`` et n'écrit jamais de ``src``
+        autre que l'adresse du bearer.
+        """
+        if existing.proto is not None:
+            return True
+        return existing.src is not None and existing.src != bearer.address
+
+    def _log_route_repair(
+        self,
+        dongle: Dongle,
+        table_id: int,
+        bearer: BearerIpConfig,
+        interface_name: str,
+        desired_via: str | None,
+        existing: RoutingRoute | None,
+        routes: list[RoutingRoute],
+    ) -> None:
+        """Journaux explicites du motif du (re)posage de la route par défaut."""
+        if existing is not None and self._route_is_foreign(existing, bearer):
+            logger.warning(
+                "Dongle %s : route par défaut ÉTRANGÈRE remplacée dans la table %d "
+                "(dev=%s via=%s proto=%s src=%s) — frontière d'isolation re-posée "
+                "(dev=%s via=%s)",
+                dongle.id, table_id, existing.dev, existing.via,
+                existing.proto, existing.src, interface_name, desired_via,
+            )
+        elif desired_via is None:
             logger.warning(
                 "Dongle %s : bearer sans passerelle — route posée sans via "
                 "('default dev %s', scope link) dans la table %d ; le trafic sort "
@@ -128,7 +171,6 @@ class UplinkRouteWriter:
                 "Dongle %s : route par défaut absente de la table %d, posée (dev=%s via=%s)",
                 dongle.id, table_id, interface_name, desired_via,
             )
-        await self.routing.add_route(table_id, "default", desired_via, interface_name)
 
     async def _apply_source_rule(
         self, dongle: Dongle, table_id: int, rules: list[RoutingRule], bearer: BearerIpConfig

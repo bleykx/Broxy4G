@@ -15,6 +15,7 @@ from broxy4g.services.uplink_routes import UplinkRouteService
 
 SERIAL = "ABC123"
 IFACE = "enx02360c7c147a"
+MAC = "02:36:0c:7c:14:7a"
 PROFILE = f"broxy4g-phone-{SERIAL}"
 BEARER_IP = "192.168.172.78"
 
@@ -143,7 +144,7 @@ async def test_connect_bring_up_failure_marks_error_and_floor(tmp_path):
 
 async def test_disconnect_offline_and_bring_down(tmp_path):
     adb, nm, routing = FakeAdb(), make_nm_with_lease(), FakeRouting()
-    await nm.ensure_profile(IFACE, PROFILE)
+    await nm.ensure_profile(IFACE, MAC, PROFILE)
     service = make_service(tmp_path, adb=adb, nm=nm, routing=routing)
     dongle = make_dongle(DongleState.ONLINE)
     dongle.route_table_id, dongle.fwmark, dongle.interface_name = 10001, 7, IFACE
@@ -161,7 +162,7 @@ async def test_reset_airplane_cycle_then_online(tmp_path):
     adb = FakeAdb()
     adb.devices = [AdbDevice(serial=SERIAL, state="device")]
     nm, routing = make_nm_with_lease(), FakeRouting()
-    await nm.ensure_profile(IFACE, PROFILE)
+    await nm.ensure_profile(IFACE, MAC, PROFILE)
     service = make_service(tmp_path, adb=adb, nm=nm, routing=routing)
     dongle = make_dongle(DongleState.RESETTING)
     dongle.route_table_id, dongle.fwmark, dongle.interface_name = 10001, 7, IFACE

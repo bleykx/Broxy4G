@@ -113,6 +113,36 @@ async def test_list_routes_parses_default_without_gateway():
     assert routes == [RoutingRoute(table_id=10001, dest="default", via=None, dev="wwan1")]
 
 
+async def test_list_routes_parses_nm_foreign_default_route():
+    """Ligne réelle de NetworkManager : ``proto dhcp`` + ``src`` doivent être
+    rapportés pour que le writer reconnaisse la route étrangère."""
+    stdout = (
+        "default via 192.168.172.245 dev enx02360c7c147a "
+        "proto dhcp src 192.168.172.79 metric 2023\n"
+    )
+    routing = _routing_with_output(stdout)
+
+    routes = await routing.list_routes(10001)
+
+    assert routes == [RoutingRoute(
+        table_id=10001, dest="default", via="192.168.172.245",
+        dev="enx02360c7c147a", proto="dhcp", src="192.168.172.79",
+    )]
+
+
+async def test_list_routes_our_default_route_keeps_proto_src_none():
+    """Notre route (sans ``proto`` ni ``src`` dans la sortie ``ip``) :
+    les deux attributs restent ``None``."""
+    routing = _routing_with_output("default via 10.159.56.49 dev dongle-1336 onlink\n")
+
+    routes = await routing.list_routes(10001)
+
+    assert routes == [RoutingRoute(
+        table_id=10001, dest="default", via="10.159.56.49",
+        dev="dongle-1336", proto=None, src=None,
+    )]
+
+
 async def test_add_barrier_route_uses_exact_unreachable_command():
     """Plancher : la commande exacte est 'ip route replace unreachable default table <T>'."""
     shell = AsyncMock(spec=ShellAdapter)

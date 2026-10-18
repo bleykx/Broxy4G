@@ -246,6 +246,73 @@ Repli documenté : lecture noyau illisible → l'adresse du bail NM est utilisé
 multi-adresses, préfixe absent ou token parasite → première adresse valide ou
 `None`.
 
+#### Profil lié par MAC et suppression des connexions NM étrangères
+
+Le profil `broxy4g-phone-<serial>` est lié à l'identité matérielle du netdev
+(`802-3-ethernet.mac-address`, MAC lue dans sysfs via
+`InterfaceAdapter.mac_address`), **pas** à `connection.interface-name`
+(instable, cf. AGENTS.md). Repli tolérant : MAC illisible → comportement
+antérieur (nom d'interface) + avertissement, jamais d'exception ;
+`_verify_profile` vérifie alors la MAC (ou le nom d'interface en repli) et
+refuse tout profil périmé.
+
+**Pourquoi** (défaut mesuré, Pi / Ubuntu 24.04 / NM 1.46) : une connexion NM
+auto pré-existante liée à la même interface par `interface-name`
+(ex. `Wired connection 1`, `autoconnect=yes`) reste **candidate** quand notre
+profil apparaît — NM ne crée une connexion auto que si aucune connexion
+compatible n'existe, mais n'en supprime jamais une pré-existante. À chaque
+(ré)activation (notamment chaque cycle mode avion du reset) elle réinstalle sa
+route par défaut dans la table `main` (`default … dev enx… metric 2023`, ~15 s
+de fuite) ; le `ipv4.never-default` de *notre* profil n'y change rien (NM ne
+supprime que la route automatique de sa propre connexion), et le garde-fou
+`guard_default_route` doit alors la supprimer à chaque cycle (4 fois en 10 min
+en recette). Le profil lié par MAC ne laisse plus cette connexion
+pré-existante candidate par nom d'interface… mais elle peut toujours l'être
+par MAC ou par activation manuelle : c'est le rôle de la suppression ci-dessous.
+
+**Suppression** (`ForeignConnectionDeleter`,
+`adapters/nm_foreign_connections.py`, appelée par
+`SmartphoneUplinkService.bring_up` juste après `ensure_profile`) : toutes les
+connexions NM dont `connection.interface-name` == notre interface **ou**
+`802-3-ethernet.mac-address` == notre MAC, de type `802-3-ethernet`, et dont
+l'uuid diffère de celui de notre profil (résolu par son nom), sont
+**supprimées** par D-Bus `Settings.Connection.Delete` — idempotent (absence =
+no-op silencieux), **jamais** une connexion active, une seule ligne de log
+`ACTION ADMIN :` par suppression (nom + uuid + interface), aucune exception
+propagée (NM en erreur → avertissement, le service continue).
+
+**Pourquoi supprimer et non « neutraliser »** (mesuré, client nmcli 1.52.1 /
+démon NM 1.46.0) :
+- toute **écriture partielle** `nmcli con mod` échoue sous le décalage
+  client/démon (`802-3-ethernet.mac-address-denylist: unknown property`) —
+  impossible de poser `autoconnect=no`/`never-default=yes` ;
+- la méthode D-Bus `Settings.Connection.Update` **remplace toutes les
+  propriétés** : un map partiel détruirait (ou ferait rejeter) la connexion —
+  à ne pas utiliser ;
+- le **chemin d'objet** ne peut être reconstruit à partir du UUID (un tiret est
+  illégal dans un chemin d'objet D-Bus : `… : not a valid object path`) : on
+  prend le champ `DBUS-PATH` fourni par `nmcli` (jamais reconstruit) ;
+- NM ne supprime **jamais** une connexion auto pré-existante quand notre profil
+  apparaît ensuite, mais notre profil est désormais lié par **MAC** : tant
+  qu'il existe, NM ne recrée pas de connexion auto → la suppression converge.
+
+**Fail-safe** : si l'uuid de notre propre profil ne peut être résolu par son
+nom, **aucune** suppression n'est tentée (on ne pourrait plus distinguer notre
+connexion des étrangères). L'énumération n'utilise que des champs **autorisés**
+(`NAME,UUID,TYPE,DBUS-PATH` ; `IFNAME` n'existe pas et ferait échouer la
+commande entièrement) ; le parsing (`network_manager_cli_output.py`) tolère le
+séparateur `:`, les champs vides et ne lève jamais d'exception.
+
+**Garantie durable recommandée (hôte)** : `[main] no-auto-default=*` dans
+`/etc/NetworkManager/NetworkManager.conf` (ou un `conf.d/*.conf`) interdit à
+NM de créer **toute** route par défaut automatique, quelle que soit la
+connexion — c'est la couverture structurelle de la fuite ci-dessus.
+`deploy/install.sh` **ne l'applique pas encore** : c'est un changement global
+du comportement réseau de l'hôte (toutes les connexions auto perdraient leur
+route par défaut automatique, y compris l'uplink de gestion de l'hôte) ; à
+appliquer manuellement **et uniquement** sur des hôtes dont l'accès réseau ne
+dépend pas d'une connexion NM auto, puis redémarrer NetworkManager.
+
 ### Même table dédiée, mêmes artefacts
 
 À partir du bearer ainsi résolu, les **mêmes** quatre artefacts de la table

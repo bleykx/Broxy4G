@@ -2,7 +2,11 @@
 
 Le téléphone est résolu par serial (sysfs, jamais de nom codé en dur) ;
 NetworkManager fournit l'adresse IPv4 sans jamais créer de seconde route
-par défaut globale. ``guard_default_route`` est le filet de sécurité :
+par défaut globale. Le profil NM est lié par **MAC** (identité matérielle)
+et les connexions NM **étrangères** de l'interface (ex. ``Wired connection N``)
+sont **supprimées** dès ``bring_up`` (écriture partielle impossible sous le
+décalage client/démon ; le profil lié par MAC empêche la recréation).
+``guard_default_route`` est le filet de sécurité :
 si une route par défaut de la table main passe par l'interface du
 téléphone, elle est journalisée et supprimée (règle projet : l'hôte ne
 doit JAMAIS avoir sa route par défaut par un de ces devices).
@@ -88,8 +92,10 @@ class SmartphoneUplinkService:
         interface = await self.wait_for_interface(serial)
         if interface is None:
             raise SmartphoneUplinkError("interface réseau du téléphone introuvable")
-        if not await self.nm.ensure_profile(interface, profile, PROFILE_METRIC):
+        mac = await self.iface.mac_address(interface)  # None → repli interface-name (averti)
+        if not await self.nm.ensure_profile(interface, mac, profile, PROFILE_METRIC):
             raise SmartphoneUplinkError(f"profil NetworkManager « {profile} » incorrect")
+        await self.nm.remove_foreign_connections(interface, mac, profile)
         if not await self.nm.up(profile):
             raise SmartphoneUplinkError(f"mise en ligne du profil « {profile} » impossible")
         lease = await self._wait_lease(profile)

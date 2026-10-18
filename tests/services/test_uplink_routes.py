@@ -7,7 +7,7 @@ Couvre aussi le plancher : une table dédiée ne doit jamais rester sans route
 import logging
 
 from broxy4g.adapters.modem_manager import BearerIpConfig, FakeModemManager, ModemInfo
-from broxy4g.adapters.routing import FakeRouting
+from broxy4g.adapters.routing import FakeRouting, RoutingRoute
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
@@ -86,6 +86,79 @@ async def test_apply_repairs_wrong_default_route():
         r.table_id == 10001 and r.source == "10.159.56.48"
         for r in await routing.list_rules()
     )
+
+
+async def test_apply_replaces_foreign_default_route_from_nm(caplog):
+    """Une /0 ÉTRANGÈRE (NetworkManager : ``proto dhcp`` + ``src`` autre) dans
+    la table dédiée est TOUJOURS remplacée par notre route, avec un
+    avertissement explicite (frontière d'isolation)."""
+    routing = CountingRouting()
+    await routing.add_rule(10001, 1)
+    routing._routes.append(RoutingRoute(
+        table_id=10001, dest="default", via="192.168.172.245",
+        dev="enx02360c7c147a", proto="dhcp", src="192.168.172.79",
+    ))
+    service = UplinkRouteService(make_modem(BEARER), routing)
+
+    with caplog.at_level(logging.WARNING):
+        await service.apply_for_dongle(make_dongle())
+
+    routes = await routing.list_routes(10001)
+    assert [(r.dest, r.via, r.dev, r.proto, r.src) for r in routes] == [
+        ("default", "10.159.56.49", "dongle-1336", None, None),
+    ]
+    assert any(
+        record.levelno == logging.WARNING and "ÉTRANGÈRE" in record.message
+        for record in caplog.records
+    )
+
+
+async def test_apply_replaces_default_route_with_foreign_src():
+    """/0 avec dev+via identiques aux nôtres mais ``src`` != adresse du
+    bearer : la route est étrangère, elle est remplacée (et le second appel
+    ne produit plus aucune écriture)."""
+    routing = CountingRouting()
+    await routing.add_rule(10001, 1)
+    routing._routes.append(RoutingRoute(
+        table_id=10001, dest="default", via="10.159.56.49",
+        dev="dongle-1336", src="192.168.172.79",
+    ))
+    service = UplinkRouteService(make_modem(BEARER), routing)
+    dongle = make_dongle()
+
+    await service.apply_for_dongle(dongle)
+
+    routes = await routing.list_routes(10001)
+    assert [(r.via, r.dev, r.proto, r.src) for r in routes] == [
+        ("10.159.56.49", "dongle-1336", None, None),
+    ]
+    writes_after_repair = routing.writes
+
+    await service.apply_for_dongle(dongle)
+
+    assert routing.writes == writes_after_repair
+
+
+async def test_apply_keeps_our_default_route_without_writes():
+    """/0 présente avec dev+via corrects, ``proto`` absent et ``src`` égal à
+    l'adresse du bearer : c'est la nôtre, aucune écriture du tout."""
+    routing = CountingRouting()
+    await routing.add_rule(10001, 1)
+    routing._routes.append(RoutingRoute(
+        table_id=10001, dest="default", via="10.159.56.49",
+        dev="dongle-1336", src="10.159.56.48",
+    ))
+    await routing.add_source_rule("10.159.56.48", 10001)
+    service = UplinkRouteService(make_modem(BEARER), routing)
+
+    writes_before = routing.writes
+    await service.apply_for_dongle(make_dongle())
+
+    assert routing.writes == writes_before
+    routes = await routing.list_routes(10001)
+    assert [(r.dest, r.via, r.dev, r.proto, r.src) for r in routes] == [
+        ("default", "10.159.56.49", "dongle-1336", None, "10.159.56.48"),
+    ]
 
 
 async def test_apply_without_gateway_writes_link_route_and_warns(caplog):

@@ -58,6 +58,12 @@ class RoutingRoute:
     dev: str | None = None
     # "unicast" ou "unreachable" (plancher anti-fuite vers la table main).
     type: str = "unicast"
+    # Attributs écrits par un acteur étranger (ex. NetworkManager) :
+    # "default via … dev … proto dhcp src 192.168.172.79 metric 2023".
+    # Notre writer ne pose JAMAIS de ``proto`` ni de ``src`` : leur présence
+    # signale une route étrangère (frontière d'isolation).
+    src: str | None = None
+    proto: str | None = None
 
 
 class FakeRouting:

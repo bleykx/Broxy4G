@@ -18,6 +18,17 @@ Facts mesurés sur hôte réel :
   (``device show <if>``) reste disponible mais mélange les adresses de toutes
   les ip-configs du device, multi-adresses comprises : le parsing robuste
   (jamais d'exception) est dans ``network_manager_cli_output``.
+- Le profil est lié à l'**identité matérielle** du netdev
+  (``802-3-ethernet.mac-address``), pas au nom d'interface (instable) : sinon
+  une connexion NM auto pré-existante épinglée par ``interface-name`` reste
+  candidate et fuit une route par défaut dans ``main`` (cf.
+  ``nm_foreign_connections.py`` et ``docs/networking.md``). Repli : MAC
+  illisible → comportement antérieur (``connection.interface-name``) + warning.
+- Les connexions NM **étrangères** de l'interface/MAC (ex. ``Wired connection N``)
+  sont **supprimées** par ``ForeignConnectionDeleter`` (D-Bus
+  ``Settings.Connection.Delete`` sur le champ ``DBUS-PATH`` fourni par ``nmcli``) :
+  l'écriture partielle est impossible sous le décalage client/démon et notre
+  profil lié par MAC empêche NM de recréer une connexion auto.
 
 Toutes les commandes passent par ``ShellAdapter`` (jamais de ``subprocess``).
 """
@@ -32,6 +43,7 @@ from .network_manager_cli_output import (
     parse_dhcp_gateway,
     parse_ipv4_address,
 )
+from .nm_foreign_connections import ForeignConnectionDeleter
 from .shell import ShellAdapter, ShellResult
 
 logger = logging.getLogger(__name__)
@@ -39,12 +51,18 @@ logger = logging.getLogger(__name__)
 # Métrique de la route du profil smartphone : élevée, jamais par défaut.
 PROFILE_METRIC = 21000
 
-_VERIFY_FIELDS = "ipv4.method,ipv4.never-default,ipv6.method,ipv4.route-metric,connection.autoconnect,connection.interface-name"
+# Le profil est vérifié sur la MAC (identité matérielle), jamais sur le nom
+# d'interface ; le 2e champ n'existe que pour le repli MAC illisible.
+_VERIFY_FIELDS = "ipv4.method,ipv4.never-default,ipv6.method,ipv4.route-metric,connection.autoconnect,802-3-ethernet.mac-address"
+_VERIFY_FIELDS_IFACE = "ipv4.method,ipv4.never-default,ipv6.method,ipv4.route-metric,connection.autoconnect,connection.interface-name"
 
 
 @runtime_checkable
 class NetworkManagerAdapter(Protocol):
-    async def ensure_profile(self, interface: str, name: str, metric: int = PROFILE_METRIC) -> bool:
+    async def ensure_profile(self, interface: str, mac: str | None, name: str, metric: int = PROFILE_METRIC) -> bool:
+        ...
+
+    async def remove_foreign_connections(self, interface: str, mac: str | None, own_profile: str) -> None:
         ...
 
     async def up(self, name: str) -> bool:
@@ -75,6 +93,7 @@ class RealNetworkManager:
         self.nmcli = nmcli_path
         self.gdbus = gdbus_path
         self._unavailable_warned = False
+        self._deleter = ForeignConnectionDeleter(shell, nmcli_path, gdbus_path)
 
     def _warn_unavailable(self, binary: str, detail: str) -> None:
         """Prévenir une seule fois par instance : les appels nmcli/gdbus sont fréquents."""
@@ -103,26 +122,45 @@ class RealNetworkManager:
         result = await self._run([self.nmcli, "con", "show", name])
         return result.returncode == 0 and bool(result.stdout.strip())
 
-    async def ensure_profile(self, interface: str, name: str, metric: int = PROFILE_METRIC) -> bool:
+    async def ensure_profile(self, interface: str, mac: str | None, name: str, metric: int = PROFILE_METRIC) -> bool:
         """Créer ou réécrire le profil RNDIS, puis vérifier.
 
+        Le profil est lié par MAC (identité matérielle du netdev) ; ``mac=None``
+        → repli tolérant sur ``connection.interface-name`` (comportement
+        antérieur) avec un avertissement, jamais d'exception.
         Écriture par D-Bus brut : ``nmcli con add``/``con mod`` sont inutilisables
         sous décalage client/démon de versions (toutes les écritures échouaient
         avec ``… : unknown property``, cf. docstring).
         """
+        if mac is None:
+            logger.warning(
+                "profil « %s » : MAC de %s illisible — repli sur "
+                "connection.interface-name (identité instable, les connexions NM "
+                "auto restent candidates sur l'interface)",
+                name,
+                interface,
+            )
         if await self.profile_exists(name):
-            if await self._verify_profile(name, metric, interface):
+            if await self._verify_profile(name, metric, interface, mac):
                 return True  # profil déjà conforme : ne pas secouer le bearer
             await self.delete_profile(name)  # AddConnection refuse d'écraser un profil existant
-        if not await self._write_profile(interface, name, metric):
+        if not await self._write_profile(interface, mac, name, metric):
             return False
-        return await self._verify_profile(name, metric, interface)
+        return await self._verify_profile(name, metric, interface, mac)
 
-    async def _write_profile(self, interface: str, name: str, metric: int) -> bool:
-        """Création du profil par ``gdbus`` : seule la valeur du dict sérialisée part."""
+    async def _write_profile(self, interface: str, mac: str | None, name: str, metric: int) -> bool:
+        """Création du profil par ``gdbus`` : seule la valeur du dict sérialisée part.
+
+        Liaison au device : ``802-3-ethernet.mac-address`` (MAC, minuscules),
+        jamais ``connection.interface-name`` — sauf repli MAC illisible.
+        """
+        if mac is not None:
+            binding = f"'mac-address': <'{self._gquote(mac.lower())}'>"
+        else:
+            binding = f"'interface-name': <'{self._gquote(interface)}'>"
         variant = (
             f"{{'connection': {{'id': <'{self._gquote(name)}'>, 'type': <'802-3-ethernet'>, "
-            f"'interface-name': <'{self._gquote(interface)}'>, 'autoconnect': <true>}}, "
+            f"{binding}, 'autoconnect': <true>}}, "
             f"'ipv4': {{'method': <'auto'>, 'never-default': <true>, "
             f"'route-metric': <{metric}>}}, 'ipv6': {{'method': <'disabled'>}}}}"
         )
@@ -140,14 +178,24 @@ class RealNetworkManager:
         """Échappe défensivement une chaîne du dict GVariant (guillemets simples)."""
         return value.replace("\\", "\\\\").replace("'", "\\'")
 
-    async def _verify_profile(self, name: str, metric: int, interface: str) -> bool:
-        result = await self._run([self.nmcli, "-g", _VERIFY_FIELDS, "con", "show", name])
+    async def _verify_profile(self, name: str, metric: int, interface: str, mac: str | None) -> bool:
+        fields = _VERIFY_FIELDS if mac is not None else _VERIFY_FIELDS_IFACE
+        result = await self._run([self.nmcli, "-g", fields, "con", "show", name])
         if result.returncode != 0:
             return False
         values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        # L'interface attendue compte : l'app résout le device dynamiquement, un
-        # nom qui a changé doit déclencher une réécriture, pas garder un profil périmé.
-        return values == ["auto", "yes", "disabled", str(metric), "yes", interface]
+        # L'identité attendue compte : un device renommé (ou un profil périmé
+        # sans MAC) doit déclencher une réécriture, pas garder l'ancien profil.
+        expected = mac.lower() if mac is not None else interface
+        return values == ["auto", "yes", "disabled", str(metric), "yes", expected]
+
+    async def remove_foreign_connections(self, interface: str, mac: str | None, own_profile: str) -> None:
+        """Supprime les connexions NM étrangères de l'interface/MAC (jamais d'active).
+
+        Délégation à ``ForeignConnectionDeleter`` ; aucune exception
+        n'est propagée (NM en erreur → avertissement, le service continue).
+        """
+        await self._deleter.delete_foreign(interface, mac, own_profile)
 
     async def up(self, name: str) -> bool:
         return (await self._run([self.nmcli, "con", "up", name])).returncode == 0
@@ -206,10 +254,11 @@ class FakeNetworkManager:
         self.calls: list[list[str]] = []
         self.up_result: bool = True
 
-    async def ensure_profile(self, interface: str, name: str, metric: int = PROFILE_METRIC) -> bool:
-        self.calls.append(["ensure_profile", interface, name, str(metric)])
+    async def ensure_profile(self, interface: str, mac: str | None, name: str, metric: int = PROFILE_METRIC) -> bool:
+        self.calls.append(["ensure_profile", interface, mac, name, str(metric)])
         self.profiles[name] = {
             "interface": interface,
+            "mac": mac,
             "metric": metric,
             "ipv4.method": "auto",
             "ipv4.never-default": "yes",
@@ -217,6 +266,9 @@ class FakeNetworkManager:
             "connection.autoconnect": "yes",
         }
         return True
+
+    async def remove_foreign_connections(self, interface: str, mac: str | None, own_profile: str) -> None:
+        self.calls.append(["remove_foreign", interface, mac, own_profile])
 
     async def up(self, name: str) -> bool:
         self.calls.append(["up", name])

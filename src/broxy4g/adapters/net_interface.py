@@ -4,7 +4,11 @@ NetworkManager n'est pas fiable pour les interfaces WWAN sur certaines
 distributions ; cette couche encapsule les appels ``ip`` testables.
 """
 
+from pathlib import Path
 from typing import Protocol, runtime_checkable
+
+# Racine sysfs des netdev de l'hôte (``/sys/class/net/<name>/…``).
+SYSFS_NET_ROOT = Path("/sys/class/net")
 
 
 @runtime_checkable
@@ -25,6 +29,9 @@ class InterfaceAdapter(Protocol):
         ...
 
     async def primary_ipv4(self, name: str) -> tuple[str, int] | None:
+        ...
+
+    async def mac_address(self, name: str) -> str | None:
         ...
 
 
@@ -99,6 +106,19 @@ class RealInterface:
             return address, int(prefix) if prefix else 0
         return None
 
+    async def mac_address(self, name: str) -> str | None:
+        """MAC du netdev lue dans sysfs (``/sys/class/net/<name>/address``).
+
+        Identité matérielle du device, minuscules ; ``None`` si illisible
+        (jamais d'exception : l'appelant replie sur le comportement antérieur).
+        """
+        if not name or "/" in name:
+            return None  # un nom de netdev ne contient jamais de séparateur
+        try:
+            return (SYSFS_NET_ROOT / name / "address").read_text().strip().lower() or None
+        except OSError:
+            return None
+
 
 class FakeInterface:
     def __init__(self):
@@ -106,6 +126,13 @@ class FakeInterface:
         # d'insertion du noyau (primaire d'abord, secondaires ensuite).
         self._addresses: dict[str, list[tuple[str, int, bool]]] = {}
         self.up: set[str] = set()
+        self.macs: dict[str, str] = {}
+
+    def set_mac(self, name: str, mac: str | None) -> None:
+        if mac is None:
+            self.macs.pop(name, None)
+        else:
+            self.macs[name] = mac
 
     def set_address(self, name: str, address: str | None) -> None:
         if address is None:
@@ -139,3 +166,6 @@ class FakeInterface:
             if not secondary:
                 return address, prefix
         return None
+
+    async def mac_address(self, name: str) -> str | None:
+        return self.macs.get(name)
