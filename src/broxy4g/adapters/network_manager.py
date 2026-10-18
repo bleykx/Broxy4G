@@ -172,12 +172,15 @@ class RealNetworkManager:
         return parse_ipv4_address(result.stdout)
 
     async def profile_ipv4(self, name: str) -> NmIpv4 | None:
-        """Adresse IPv4 du profil (``addr/prefix``) ; ``None`` s'il n'a pas de bail.
+        """Présence d'une adresse IPv4 sur le profil (``addr/prefix``) ; ``None`` sinon.
 
-        Scooping au profil de ``nmcli -g IP4.ADDRESS con show <name>`` : ne
+        Lecture scopée au profil de ``nmcli -g IP4.ADDRESS con show <name>`` : ne
         renvoie JAMAIS l'adresse d'une autre (ou résiduelle) connexion du
-        device — c'est la lecture du chemin smartphone (fail-closed : pas
-        d'adresse → l'appelant force le plancher).
+        device — c'est la **porte de présence** du chemin smartphone (fail-closed :
+        pas d'adresse → l'appelant force le plancher). La **valeur** de l'adresse
+        du bearer ne vient pas d'ici : l'ordre imprimé par ``nmcli`` n'est pas
+        fiable (deux adresses sur une ligne, ordre observé variable), elle est lue
+        dans le noyau (``InterfaceAdapter.primary_ipv4``).
         """
         result = await self._run([self.nmcli, "-g", "IP4.ADDRESS", "con", "show", name])
         if result.returncode != 0:

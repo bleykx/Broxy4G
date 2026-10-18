@@ -96,20 +96,50 @@ class SmartphoneUplinkService:
         if lease is None:
             raise SmartphoneUplinkError("adresse IP non attribuée au téléphone (DHCP)")
         await self.guard_default_route(interface)
+        bearer = await self._bearer_address(profile, interface)
+        if bearer is None:
+            # Course possible : le bail vient d'être confirmé mais le profil a
+            # perdu son adresse entre les deux lectures → échec métier, pas de
+            # bearer fabriqué.
+            raise SmartphoneUplinkError("adresse IP non attribuée au téléphone (DHCP)")
         return BearerIpConfig(
-            address=lease.address,
-            prefix=lease.prefix,
+            address=bearer.address,
+            prefix=bearer.prefix,
             gateway=await self.nm.dhcp_gateway(profile),
             method="dhcp",
         )
 
     async def _wait_lease(self, profile: str) -> NmIpv4 | None:
+        """Boucle d'attente du **bail** (gate ``profile_ipv4``) ; distincte de la
+        valeur de l'adresse (``_bearer_address``) : l'appelant doit distinguer
+        « pas de bail » de « pas d'adresse noyau »."""
         for _ in range(self.dhcp_wait_attempts):
             lease = await self.nm.profile_ipv4(profile)
             if lease is not None:
                 return lease
             await asyncio.sleep(self.dhcp_wait_delay)
         return await self.nm.profile_ipv4(profile)
+
+    async def _bearer_address(self, profile: str, interface: str) -> NmIpv4 | None:
+        """Adresse IPv4 du bearer : **présence** scopée au profil, **valeur** lue
+        dans le noyau.
+
+        La présence vient du profil (fail-closed) : ``nm.profile_ipv4`` non
+        ``None`` ⇔ notre profil porte une adresse (notre connexion est active) ;
+        une adresse étrangère sur l'interface ne compte jamais. La valeur vient
+        du noyau (``primary_ipv4``) : l'ordre de la sortie ``nmcli`` n'est pas
+        fiable (deux adresses sur une ligne, ordre observé variable), or c'est
+        l'adresse primaire du noyau que le noyau utilise réellement comme source.
+        Repli documenté : si la lecture noyau échoue (``None``), on repart de
+        l'adresse du bail NM — jamais d'exception, jamais d'adresse inventée.
+        """
+        lease = await self.nm.profile_ipv4(profile)
+        if lease is None:
+            return None
+        kernel = await self.iface.primary_ipv4(interface)
+        if kernel is None:
+            return lease
+        return NmIpv4(address=kernel[0], prefix=kernel[1])
 
     async def bring_down(self, serial: str) -> None:
         """Stop profil puis désactive le partage USB ; jamais d'exception transitoire."""
@@ -128,17 +158,23 @@ class SmartphoneUplinkService:
     async def current_bearer(self, serial: str) -> BearerIpConfig | None:
         """Bearer courant (lecture seule, sans activer le partage) ; ``None`` si indispo.
 
-        Scooping au profil (fail-closed) : une adresse sur le device qui n'appartient
-        pas à notre profil ne fabrique jamais de bearer — l'appelant force alors
-        le plancher au lieu de sourcer la route avec une adresse étrangère.
+        Présence scopée au profil (fail-closed) : une adresse sur le device qui
+        n'appartient pas à notre profil ne fabrique jamais de bearer — l'appelant
+        force alors le plancher au lieu de sourcer la route avec une adresse
+        étrangère. La valeur vient du noyau (``_bearer_address``), jamais de
+        ``nmcli`` : on re-résout l'interface (``None`` → ``None``, plus d'adresse
+        fabriquée sans interface).
         """
+        interface = self.resolve_interface(serial)
+        if interface is None:
+            return None
         profile = self.profile_name(serial)
-        lease = await self.nm.profile_ipv4(profile)
-        if lease is None:
+        bearer = await self._bearer_address(profile, interface)
+        if bearer is None:
             return None
         return BearerIpConfig(
-            address=lease.address,
-            prefix=lease.prefix,
+            address=bearer.address,
+            prefix=bearer.prefix,
             gateway=await self.nm.dhcp_gateway(profile),
             method="dhcp",
         )
@@ -157,10 +193,15 @@ class SmartphoneUplinkService:
             raise SmartphoneUplinkError(f"route par défaut de l'hôte détournée via {interface}")
 
     async def is_live(self, serial: str, address: str) -> bool:
-        """Vrai si le profil du serial porte encore exactement ``address``.
+        """Vrai si le bearer porté par notre profil est encore exactement ``address``.
 
-        Scooping au profil (fail-closed) : une adresse d'une autre connexion
-        sur l'interface ne compte pas comme vivante.
+        Présence scopée au profil (fail-closed) : une adresse d'une autre connexion
+        sur l'interface ne compte pas comme vivante. La valeur comparée est celle
+        du noyau (``_bearer_address``) — repli sur le bail si la lecture noyau
+        échoue. Jamais d'exception.
         """
-        lease = await self.nm.profile_ipv4(self.profile_name(serial))
-        return lease is not None and lease.address == address
+        interface = self.resolve_interface(serial)
+        if interface is None:
+            return False
+        bearer = await self._bearer_address(self.profile_name(serial), interface)
+        return bearer is not None and bearer.address == address

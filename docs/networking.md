@@ -222,15 +222,26 @@ show`) est converti en configuration du bearer (`BearerIpConfig`, méthode
 `dhcp`) — exactement la même structure que celle qu'expose ModemManager pour un
 modem.
 
-L'adresse est lue **scopée au profil** (`nmcli -g IP4.ADDRESS con show
-broxy4g-phone-<serial>`, `profile_ipv4`), jamais sur le device : la vue device
-mélange les ip-configs de **toutes** les connexions de l'interface (mesuré :
-`192.168.172.79/24 | 192.168.172.78/24` sur une seule ligne, l'ordre imprimé ne
-reflétant pas l'adresse source du noyau) et renvoie une adresse même quand
-notre profil n'est pas actif. Conséquence recherchée (fail-closed) : pas
-d'adresse sur **notre** profil → pas de bearer → le plancher anti-fuite est
-forcé, au lieu de construire la route et la règle source avec une adresse
-étrangère. Le parsing de ces sorties
+Deux rôles distincts, volontairement séparés (`_bearer_address`) :
+
+- **valeur de l'adresse** = **vérité noyau** (`InterfaceAdapter.primary_ipv4` :
+  `ip -o -4 addr show dev <iface> scope global`, première entrée `inet` dont les
+  drapeaux ne contiennent pas `secondary`). C'est l'adresse que le noyau retient
+  comme source pour une route sans `prefsrc`, donc celle que la règle source doit
+  viser. L'ordre imprimé par `nmcli` n'est **pas** fiable : mesuré sur hôte réel
+  (Galaxy A21S, RNDIS), `nmcli -g IP4.ADDRESS` imprimait
+  `192.168.172.79/24 | 192.168.172.78/24` dans un ordre **variable** entre deux
+  cycles, alors que le noyau sourçait `.78` (primaire) et non `.79`
+  (`secondary`) — la règle source écrivait donc `.79` et ne couvrait pas
+  l'adresse réellement utilisée ;
+- **présence de l'adresse** = scopée au **profil** (`nmcli -g IP4.ADDRESS con
+  show broxy4g-phone-<serial>`, `profile_ipv4`). Fail-closed : pas d'adresse sur
+  **notre** profil → pas de bearer → le plancher anti-fuite est forcé, au lieu de
+  construire la route et la règle source avec une adresse étrangère (la vue
+  device, elle, renvoie une adresse même quand notre profil n'est pas actif).
+
+Repli documenté : lecture noyau illisible → l'adresse du bail NM est utilisée
+(jamais d'adresse inventée, jamais d'exception). Le parsing des sorties `nmcli`
 (`adapters/network_manager_cli_output.py`) ne lève **jamais** d'exception :
 multi-adresses, préfixe absent ou token parasite → première adresse valide ou
 `None`.
@@ -240,11 +251,13 @@ multi-adresses, préfixe absent ou token parasite → première adresse valide o
 À partir du bearer ainsi résolu, les **mêmes** quatre artefacts de la table
 dédiée sont posés de façon idempotente (`services/uplink_route_writer.py`) :
 règle `fwmark` → table dédiée, route par défaut de la table
-(`default via <gw> dev <iface>`), règle source **`from <IP du bail DHCP>`**
-et plancher anti-fuite `default unreachable`. L'IP du bail DHCP (l'adresse
-portée par la netdev RNDIS) est la source de la règle
+(`default via <gw> dev <iface>`), règle source **`from <adresse primaire du
+noyau>`** et plancher anti-fuite `default unreachable`. L'adresse primaire de la
+netdev RNDIS (celle que le noyau utilise comme source, voir ci-dessus) est la
+source de la règle
 `ip rule from <IP> lookup <table>` : le trafic du proxy (marqué par `fwmark`)
-sort **par le téléphone**.
+sort **par le téléphone**, et les sondes épinglées à cette source mesurent bien
+cet uplink.
 
 **Pourquoi la règle source compte ici** : les sondes de connectivité (ping,
 IP publique, dont le gate de `DONE` du reset) sont épinglées à l'IP **source

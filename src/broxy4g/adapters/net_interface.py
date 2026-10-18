@@ -24,6 +24,9 @@ class InterfaceAdapter(Protocol):
     async def get_ip(self, name: str) -> str | None:
         ...
 
+    async def primary_ipv4(self, name: str) -> tuple[str, int] | None:
+        ...
+
 
 class RealInterface:
     def __init__(self, shell):
@@ -62,17 +65,57 @@ class RealInterface:
                 return value.split("/", 1)[0]
         return None
 
+    async def primary_ipv4(self, name: str) -> tuple[str, int] | None:
+        """Adresse primaire IPv4 telle que lue par le **noyau** (``scope global``).
+
+        L'ordre de la sortie ``ip`` est l'ordre d'insertion : l'adresse primaire
+        d'abord, les ``secondary`` ensuite. C'est l'adresse que le noyau retient
+        comme source pour une route sans ``prefsrc``. L'ordre de la sortie
+        ``nmcli`` n'est PAS fiable : cas mesuré sur hôte réel (Galaxy A21S,
+        RNDIS) — le profil imprimait ``192.168.172.79/24 | 192.168.172.78/24``
+        (l'ordre variant entre deux cycles) alors que le noyau sourçait
+        ``192.168.172.78`` (primaire) et non ``.79`` (secondary). Retient la
+        première entrée ``inet`` dont les drapeaux ne contiennent pas
+        ``secondary``. Jamais d'exception : rc ≠ 0, sortie vide, ligne illisible
+        ou préfixe corrompu → ``None`` (ou l'entrée suivante).
+        """
+        result = await self.shell.run(
+            ["ip", "-o", "-4", "addr", "show", "dev", name, "scope", "global"]
+        )
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if "inet" not in parts or "secondary" in parts:
+                continue
+            if "scope" in parts and parts[parts.index("scope") + 1] != "global":
+                continue
+            inet_idx = parts.index("inet")
+            if inet_idx + 1 >= len(parts):
+                continue
+            address, _, prefix = parts[inet_idx + 1].partition("/")
+            if prefix and not prefix.isdigit():
+                continue
+            return address, int(prefix) if prefix else 0
+        return None
+
 
 class FakeInterface:
     def __init__(self):
-        self._addresses: dict[str, str] = {}
+        # name -> liste ordonnée de (adresse, préfixe, secondary), dans l'ordre
+        # d'insertion du noyau (primaire d'abord, secondaires ensuite).
+        self._addresses: dict[str, list[tuple[str, int, bool]]] = {}
         self.up: set[str] = set()
 
     def set_address(self, name: str, address: str | None) -> None:
         if address is None:
             self._addresses.pop(name, None)
         else:
-            self._addresses[name] = address
+            self._addresses[name] = [(address, 0, False)]
+
+    def set_addresses(self, name: str, entries: list[tuple[str, int, bool]]) -> None:
+        """Porte plusieurs adresses dans l'ordre ( ``(adresse, préfixe, secondary)`` )."""
+        self._addresses[name] = list(entries)
 
     async def set_up(self, name: str) -> None:
         self.up.add(name)
@@ -82,10 +125,17 @@ class FakeInterface:
 
     async def assign_address(self, name: str, address: str, prefix: int) -> None:
         self.up.add(name)
-        self._addresses[name] = address
+        self._addresses[name] = [(address, prefix, False)]
 
     async def flush_ipv4(self, name: str) -> None:
         self._addresses.pop(name, None)
 
     async def get_ip(self, name: str) -> str | None:
-        return self._addresses.get(name)
+        entries = self._addresses.get(name)
+        return entries[0][0] if entries else None
+
+    async def primary_ipv4(self, name: str) -> tuple[str, int] | None:
+        for address, prefix, secondary in self._addresses.get(name, []):
+            if not secondary:
+                return address, prefix
+        return None

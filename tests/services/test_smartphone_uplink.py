@@ -28,11 +28,11 @@ def make_sysfs(tmp_path, serial: str = SERIAL, iface: str = IFACE) -> str:
     return str(root)
 
 
-def make_service(tmp_path, adb=None, nm=None, routing=None):
+def make_service(tmp_path, adb=None, nm=None, routing=None, iface=None):
     return SmartphoneUplinkService(
         adb or FakeAdb(),
         nm or FakeNetworkManager(),
-        FakeInterface(),
+        iface or FakeInterface(),
         routing or FakeRouting(),
         sysfs_root=make_sysfs(tmp_path),
         iface_wait_attempts=2,
@@ -55,7 +55,9 @@ async def test_bring_up_nominal_returns_bearer_dhcp(tmp_path):
     nm = FakeNetworkManager()
     nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
     nm.gateways[PROFILE] = "192.168.172.245"
-    service = make_service(tmp_path, nm=nm)
+    iface = FakeInterface()
+    iface.set_addresses(IFACE, [("192.168.172.78", 24, False)])  # vérité noyau attendue
+    service = make_service(tmp_path, nm=nm, iface=iface)
 
     bearer = await service.bring_up(SERIAL)
 
@@ -139,7 +141,9 @@ async def test_current_bearer_reads_state_without_side_effects(tmp_path):
     nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
     nm.gateways[PROFILE] = "192.168.172.245"
     adb = FakeAdb()
-    service = make_service(tmp_path, adb=adb, nm=nm)
+    iface = FakeInterface()
+    iface.set_addresses(IFACE, [("192.168.172.78", 24, False)])  # vérité noyau attendue
+    service = make_service(tmp_path, adb=adb, nm=nm, iface=iface)
 
     bearer = await service.current_bearer(SERIAL)
 
@@ -152,7 +156,9 @@ async def test_current_bearer_reads_state_without_side_effects(tmp_path):
 async def test_is_live_checks_exact_address(tmp_path):
     nm = FakeNetworkManager()
     nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
-    service = make_service(tmp_path, nm=nm)
+    iface = FakeInterface()
+    iface.set_address(IFACE, "192.168.172.78")  # vérité noyau attendue
+    service = make_service(tmp_path, nm=nm, iface=iface)
 
     assert await service.is_live(SERIAL, "192.168.172.78") is True
     assert await service.is_live(SERIAL, "10.0.0.2") is False
@@ -166,6 +172,77 @@ async def test_is_live_false_when_only_device_has_address(tmp_path):
     service = make_service(tmp_path, nm=nm)
 
     assert await service.is_live(SERIAL, "192.168.172.78") is False
+
+
+async def test_bearer_uses_kernel_primary_not_nmcli_order(tmp_path):
+    """Régression du défaut mesuré (Galaxy A21S, RNDIS) : le profil ``nmcli``
+    renvoie ``.79`` en tête (ordre non fiable) alors que le noyau source
+    réellement ``.78`` (primaire). Le bearer (donc la règle source) doit porter
+    ``.78``. Sans la correction, le code renvoie ``.79`` → le test échoue."""
+    nm = FakeNetworkManager()
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.79", 24)  # ce que nmcli imprime en 1er
+    iface = FakeInterface()
+    iface.set_addresses(
+        IFACE,
+        [("192.168.172.78", 24, False), ("192.168.172.79", 24, True)],
+    )  # noyau : .78 primaire, .79 secondary
+    service = make_service(tmp_path, nm=nm, iface=iface)
+
+    bearer = await service.current_bearer(SERIAL)
+    assert bearer is not None
+    assert bearer.address == "192.168.172.78"
+    assert bearer.prefix == 24
+
+
+async def test_bearer_falls_back_to_nm_lease_when_kernel_unreadable(tmp_path):
+    """Repli : noyau illisible (aucune adresse) → l'adresse du bail NM est utilisée
+    (jamais ``None`` si le profil porte une adresse)."""
+    nm = FakeNetworkManager()
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
+    iface = FakeInterface()  # aucune adresse noyau
+    service = make_service(tmp_path, nm=nm, iface=iface)
+
+    bearer = await service.current_bearer(SERIAL)
+    assert bearer is not None
+    assert bearer.address == "192.168.172.78"
+    assert bearer.prefix == 24
+
+
+async def test_current_bearer_none_when_profile_empty_but_kernel_has_address(tmp_path):
+    """Fail-closed : une adresse présente sur l'interface mais absente de notre
+    profil ne fabrique jamais de bearer (elle est étrangère à notre uplink)."""
+    nm = FakeNetworkManager()  # profil sans bail
+    iface = FakeInterface()
+    iface.set_address(IFACE, "192.168.172.78")  # adresse sur le device seulement
+    service = make_service(tmp_path, nm=nm, iface=iface)
+
+    assert await service.current_bearer(SERIAL) is None
+
+
+async def test_current_bearer_none_when_interface_unresolvable(tmp_path):
+    """Plus d'adresse fabriquée sans interface : sysfs sans serial → ``None``
+    même si le profil porte une adresse."""
+    nm = FakeNetworkManager()
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.78", 24)
+    service = make_service(tmp_path, nm=nm)  # sysfs ne porte que SERIAL
+
+    assert await service.current_bearer("UNKNOWN") is None
+
+
+async def test_is_live_compares_against_kernel_address(tmp_path):
+    """``is_live`` compare à l'adresse **noyau** (pas à l'ordre ``nmcli``) :
+    profil ``.79``, noyau ``.78`` → vivant sur ``.78``, non vivant sur ``.79``."""
+    nm = FakeNetworkManager()
+    nm.profile_ips[PROFILE] = NmIpv4("192.168.172.79", 24)
+    iface = FakeInterface()
+    iface.set_addresses(
+        IFACE,
+        [("192.168.172.78", 24, False), ("192.168.172.79", 24, True)],
+    )
+    service = make_service(tmp_path, nm=nm, iface=iface)
+
+    assert await service.is_live(SERIAL, "192.168.172.78") is True
+    assert await service.is_live(SERIAL, "192.168.172.79") is False
 
 
 async def test_profile_name_sanitized(tmp_path):
