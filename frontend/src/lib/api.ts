@@ -2,6 +2,7 @@ import {
   DongleSummary,
   DongleDetail,
   DongleEnrollmentResponse,
+  DongleEnrollmentRequest,
   ProxyDetail,
   ProxyWithPassword,
   ResetResponse,
@@ -66,15 +67,14 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 }
 
 export const api = {
-  health: {
-    get: () => request<{ status: string }>('/health'),
-    getVersion: () => request<{ version: string }>('/version'),
+  session: {
+    verify: () => request<{ authenticated: boolean }>('/session'),
   },
   dongles: {
     list: () => request<DongleSummary[]>('/dongles'),
     discovered: () => request<DiscoveredDongle[]>('/dongles/discovered'),
     get: (id: string) => request<DongleDetail>(`/dongles/${id}`),
-    create: (data: Partial<DongleDetail>) =>
+    create: (data: DongleEnrollmentRequest) =>
       request<DongleEnrollmentResponse>('/dongles', {
         method: 'POST',
         body: JSON.stringify(data),

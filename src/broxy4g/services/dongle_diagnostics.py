@@ -14,7 +14,7 @@ from broxy4g.adapters.net_interface import InterfaceAdapter
 from broxy4g.domain.degraded_arbiter import ProbeVerdict
 from broxy4g.domain.dongle import Dongle
 from broxy4g.repositories.dongle_repository import DongleRepository
-from broxy4g.services.uplink_probe import UplinkProbe
+from broxy4g.services.uplink_probe import PublicIpVerdict, UplinkProbe
 from broxy4g.services.uplink_routes import UplinkRouteService
 
 __all__ = ["DongleDiagnostics", "DongleMetrics"]
@@ -66,6 +66,10 @@ class DongleDiagnostics:
     async def get_public_ip(self, dongle_id: UUID) -> str | None:
         dongle = await self._load(dongle_id)
         return await self.probe.public_ip(dongle.interface_name)
+
+    async def get_public_ip_verdict(self, dongle_id: UUID) -> PublicIpVerdict:
+        dongle = await self._load(dongle_id)
+        return await self.probe.public_ip_verdict(dongle.interface_name)
 
     async def get_session_id(self, dongle_id: UUID) -> str | None:
         """Identifiant de la session data courante du dongle (None si inconnue)."""

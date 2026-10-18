@@ -6,6 +6,7 @@ import broxy4g.domain.dongle as dongle_module
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState, InvalidStateTransition
 from broxy4g.domain.identity import IdentityMaterial
+from broxy4g.domain.transport import Transport
 
 
 class _AdvancingClock:
@@ -23,6 +24,12 @@ def test_dongle_creation():
     identity = IdentityMaterial(imei="123456789012345")
     dongle = Dongle(identity=identity, label="Test Dongle")
     assert dongle.state == DongleState.DISCOVERED
+
+
+def test_dongle_default_transport_is_modem():
+    identity = IdentityMaterial(imei="123456789012345")
+    dongle = Dongle(identity=identity, label="Test Dongle")
+    assert dongle.transport is Transport.MODEM
 
 
 def test_dongle_change_state_valid():

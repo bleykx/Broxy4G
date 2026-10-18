@@ -165,6 +165,8 @@ export const Dashboard: React.FC = () => {
                 onViewDetails={() => navigate(`/dongles/${d.id}`)}
                 onReset={() => handleReset(d)}
                 onDelete={() => { setDeleteError(null); setDeleteTarget(d); }}
+                onRotateNotice={(n) => { setNotice(n); batch.dismissNotice(); }}
+                onRotateSettled={loadDongles}
               />
             ))}
           </div>

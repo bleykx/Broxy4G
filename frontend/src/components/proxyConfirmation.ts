@@ -15,8 +15,8 @@ export const PROXY_CONFIRM: Record<ProxyConfirmKind, {
     destructive: true,
   },
   rotate: {
-    title: 'View credentials',
-    message: 'The password was never stored, so viewing it regenerates a new one. Existing clients are disconnected until updated with the new password, which is shown only once.',
+    title: 'Regenerate credentials',
+    message: 'The proxy password is stored only as a hash and cannot be retrieved. Regenerating issues a new password, shown only once; existing clients are disconnected until updated with it.',
     confirmLabel: 'Regenerate',
     busyLabel: 'Regenerating…',
   },

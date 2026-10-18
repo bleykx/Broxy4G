@@ -2,7 +2,11 @@
 
 import pytest
 
-from broxy4g.adapters.docker_compose import FakeDockerCompose, RealDockerCompose
+from broxy4g.adapters.docker_compose import (
+    FakeDockerCompose,
+    RealDockerCompose,
+    parse_published_ports,
+)
 from broxy4g.adapters.shell_real import FakeShell, ShellResult
 
 PROJECT = "p1"
@@ -118,3 +122,56 @@ class TestFakeDockerCompose:
         fake = FakeDockerCompose()
         await fake.down(PROJECT, COMPOSE_DIR)
         assert await fake.state(PROJECT) is None
+
+    async def test_published_ports_default_empty_and_settable(self):
+        fake = FakeDockerCompose()
+        assert await fake.published_host_ports() == set()
+        fake.published_ports = {31201, 8099}
+        assert await fake.published_host_ports() == {31201, 8099}
+
+
+class TestPublishedHostPorts:
+    """Parsing des ports publiés — formats réels de ``docker ps -a``."""
+
+    PS_CMD = ["docker", "ps", "-a", "--format", "{{.Ports}}"]
+
+    def test_parse_real_broxy4g_format(self):
+        stdout = (
+            "192.168.1.40:31205->3128/tcp\n"
+            "192.168.1.40:31203->3128/tcp\n"
+            "192.168.1.40:31202->3128/tcp\n"
+            "192.168.1.40:31201->3128/tcp\n"
+            "192.168.1.40:31204->3128/tcp\n"
+        )
+        assert parse_published_ports(stdout) == {31201, 31202, 31203, 31204, 31205}
+
+    def test_parse_multiple_entries_same_line(self):
+        # L'entrée sans « -> » (port interne non publié) est ignorée.
+        stdout = "0.0.0.0:31201->3128/tcp, [::]:31201->3128/tcp, 8099/tcp\n"
+        assert parse_published_ports(stdout) == {31201}
+
+    def test_parse_ignores_unpublished_internal_ports(self):
+        stdout = "3128/tcp\n"
+        assert parse_published_ports(stdout) == set()
+
+    def test_parse_binds_to_specific_ip(self):
+        stdout = "127.0.0.1:31250->3128/tcp\n"
+        assert parse_published_ports(stdout) == {31250}
+
+    def test_parse_empty(self):
+        assert parse_published_ports("") == set()
+        assert parse_published_ports("\n\n") == set()
+
+    async def test_adapter_returns_ports_on_success(self):
+        shell = FakeShell()
+        shell.set_response(
+            self.PS_CMD, ShellResult(0, "192.168.1.40:31201->3128/tcp\n", "")
+        )
+        adapter = RealDockerCompose(shell)
+
+        assert await adapter.published_host_ports() == {31201}
+        assert shell.calls == [(self.PS_CMD, 5.0)]
+
+    async def test_adapter_error_yields_empty_set(self):
+        shell = FakeShell()  # par défaut : rc=1
+        assert await RealDockerCompose(shell).published_host_ports() == set()

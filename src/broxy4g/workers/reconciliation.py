@@ -1,6 +1,7 @@
 import logging
 from uuid import UUID
 
+from broxy4g.adapters.adb import AdbAdapter
 from broxy4g.adapters.connectivity import ConnectivityAdapter
 from broxy4g.adapters.docker_compose import DockerComposeAdapter
 from broxy4g.adapters.modem_manager import ModemManagerAdapter
@@ -8,7 +9,7 @@ from broxy4g.adapters.nftables import NftablesAdapter
 from broxy4g.adapters.routing import RoutingAdapter
 from broxy4g.domain.degraded_arbiter import DegradedArbiter
 from broxy4g.domain.dongle import Dongle
-from broxy4g.domain.dongle_states import DongleState, can_transition
+from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
@@ -20,8 +21,11 @@ from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.proxy_network import ProxyNetworkService
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.routing_slot_migration import RoutingSlotMigration
+from broxy4g.services.smartphone_uplink import SmartphoneUplinkService
 from broxy4g.services.uplink_routes import UplinkRouteService
 from broxy4g.services.usb_recovery import UsbRecoveryService
+from broxy4g.workers.adb_soft_recovery import AdbSoftRecovery
+from broxy4g.workers.dongle_restoration import DongleRestoration
 from broxy4g.workers.proxy_reconciliation import ProxyReconciler
 
 logger = logging.getLogger(__name__)
@@ -50,6 +54,8 @@ class ReconciliationWorker:
         usb_recovery: UsbRecoveryService | None = None,
         proxy_network: ProxyNetworkService | None = None,
         min_consecutive: int = 2,
+        adb: AdbAdapter | None = None,
+        smartphone: SmartphoneUplinkService | None = None,
     ):
         """``min_consecutive`` = nb d'échecs faibles consécutifs avant DEGRADED.
 
@@ -58,29 +64,34 @@ class ReconciliationWorker:
         réinitialise (comme le compteur de ``UsbRecoveryService``).
         """
         self.dongle_repo = dongle_repo
-        self.proxy_repo = proxy_repo
-        self.modem = modem
-        self.routing = routing
-        self.nft = nft
-        self.connectivity = connectivity
         self.connection_service = connection_service
-        self.provisioning = provisioning
         self.docker_compose = docker_compose
         self.metrics_snapshot = metrics_snapshot
-        self.uplink_routes = uplink_routes
         self.slot_migration = slot_migration
         self.isolation = isolation
-        self.reset_lock = reset_lock
-        self.local_connections = local_connections
-        self.usb_recovery = usb_recovery
         self.proxy_network = proxy_network
-        self.verdicts = ConnectivityVerdictService(DegradedArbiter(min_consecutive=min_consecutive))
+        self.usb_recovery = usb_recovery
+        self.reset_lock = reset_lock
         self.proxy_reconciler = ProxyReconciler(
             proxy_repo=proxy_repo,
             dongle_repo=dongle_repo,
             provisioning=provisioning,
             docker_compose=docker_compose,
             local_connections=local_connections,
+        )
+        verdicts = ConnectivityVerdictService(DegradedArbiter(min_consecutive=min_consecutive))
+        self.adb_soft_recovery = AdbSoftRecovery(
+            adb=adb,
+            smartphone=smartphone,
+            dongle_repo=dongle_repo,
+            usb_recovery=usb_recovery,
+        )
+        self.restoration = DongleRestoration(
+            connection_service=connection_service,
+            uplink_routes=uplink_routes,
+            dongle_repo=dongle_repo,
+            verdicts=verdicts,
+            metrics_snapshot=metrics_snapshot,
         )
 
     async def reconcile_all(self) -> None:
@@ -113,16 +124,18 @@ class ReconciliationWorker:
             logger.exception("Échec réparation doublons de slots de routage")
 
     async def _ensure_proxy_network(self) -> None:
-        """Vérifie la passerelle du bridge du réseau proxy.
+        """Vérifie que le réseau proxy est exploitable (réseau + passerelle).
 
-        Un échec de cette étape ne doit pas faire échouer tout le cycle.
+        ``ensure_ready`` recrée le pont s'il est absent (reboot, suppression
+        accidentelle) avant tout démarrage de conteneur proxy. Un échec de
+        cette étape ne doit pas faire échouer tout le cycle.
         """
         if self.proxy_network is None:
             return
         try:
-            await self.proxy_network.ensure_gateway()
+            await self.proxy_network.ensure_ready()
         except Exception:
-            logger.exception("Échec vérification passerelle réseau proxy")
+            logger.exception("Échec vérification réseau proxy")
 
     async def _reapply_isolation(self) -> None:
         """Réaligne la table nftables d'isolation sur l'état persisté."""
@@ -165,9 +178,10 @@ class ReconciliationWorker:
         # Récupération douce : un dongle bloqué (ERROR/OFFLINE) avec un
         # bearer PPP (aucun netdev) ne peut pas se rétablir en reconnectant ;
         # on tente une ré-énumération USB bornée avant la restauration.
-        await self._attempt_usb_recovery(dongle)
+        await self.adb_soft_recovery.attempt_soft_recovery(dongle)
 
-        dongle = await self._restore_connection_if_needed(dongle)
+        dongle = await self.restoration.restore_connection_if_needed(dongle)
+        dongle = await self.adb_soft_recovery.refresh_interface(dongle)
 
         # (Re)pose des routes d'uplink SANS reconnexion AVANT le démarrage du
         # conteneur proxy : la route réelle ou le plancher de la table dédiée
@@ -177,79 +191,10 @@ class ReconciliationWorker:
         await self.proxy_reconciler.restore_dongle_proxy(dongle)
         await self._verify_connectivity(dongle)
 
-    async def _restore_connection_if_needed(self, dongle: Dongle) -> Dongle:
-        """Restaure la connexion si le dongle n'est pas déjà actif.
-
-        Un dongle déjà actif (ONLINE/CONNECTING) n'est jamais reconnecté. Un
-        DEGRADED dont le bearer est encore vivant (IP du bearer présente sur
-        l'interface) non plus : connect() ferait flush_ipv4 + assign_address
-        et changerait l'IP de bearer à chaque cycle ; seules les routes sont
-        réparées ensuite, sans toucher au modem. Bearer mort/absent/IP périmée
-        → connect() comme avant.
-
-        Retourne le dongle, rechargé depuis le dépôt si connect() a tourné
-        (connect() charge et persiste sa propre copie).
-        """
-        if dongle.state in (DongleState.ONLINE, DongleState.CONNECTING):
-            return dongle
-        if dongle.state == DongleState.DEGRADED and await self.connection_service.bearer_is_live(dongle):
-            logger.info(
-                "Reconciliation dongle %s (DEGRADED, bearer vivant) : sans reconnexion",
-                dongle.id,
-            )
-            return dongle
-        logger.info("Reconciliation dongle %s (état=%s)", dongle.id, dongle.state.value)
-        await self._restore_connection(dongle)
-        # connection_service.connect() charge et persiste sa propre copie ;
-        # recharger pour que la vérification voie le nouvel état.
-        refreshed = await self.dongle_repo.get_by_id(dongle.id)
-        return refreshed if refreshed is not None else dongle
-
-    async def _attempt_usb_recovery(self, dongle) -> None:
-        """Délègue la récupération USB douce ; un échec ne casse pas le cycle."""
-        if self.usb_recovery is None:
-            return
-        try:
-            await self.usb_recovery.attempt(dongle.id)
-        except Exception:
-            logger.exception("Échec récupération USB douce dongle %s", dongle.id)
-
-    async def _restore_connection(self, dongle) -> None:
-        """Rétablit la connexion mobile et les routes."""
-        try:
-            await self.connection_service.connect(dongle.id)
-        except Exception as exc:
-            logger.exception("Échec restauration connexion dongle %s", dongle.id)
-            dongle.last_error = f"{type(exc).__name__}: {exc}"
-            if can_transition(dongle.state, DongleState.ERROR):
-                dongle.change_state(DongleState.ERROR)
-            await self.dongle_repo.save(dongle)
-
     async def _repair_uplink_routes(self, dongle) -> None:
-        """(Re)pose les routes d'uplink du dongle sans reconnexion du modem.
-
-        Un échec de cette étape ne doit pas faire échouer tout le cycle.
-        """
-        try:
-            await self.uplink_routes.apply_for_dongle(dongle)
-        except Exception:
-            logger.exception("Échec réparation routes uplink dongle %s", dongle.id)
+        """(Re)pose les routes d'uplink du dongle (délégation à la restauration)."""
+        await self.restoration.repair_uplink_routes(dongle)
 
     async def _verify_connectivity(self, dongle) -> None:
-        """Vérifie la connectivité et met à jour l'état (hystérésis DEGRADED).
-
-        Le verdict binaire « pas d'IP publique → DEGRADED » est remplacé par
-        l'arbitre tri-état (``services/connectivity_verdict.py``) : une sonde
-        faible unique ne marque plus DEGRADED, la sortie est immédiate dès
-        que l'IP publique revient.
-        """
-        try:
-            metrics = await self.connection_service.get_metrics(dongle.id)
-            signal = metrics.signal_quality.percent if metrics.signal_quality else None
-            self.metrics_snapshot.update(dongle.id, metrics.public_ip, signal)
-            target = self.verdicts.assess(dongle.id, metrics)
-            if target is not None and dongle.state != target and can_transition(dongle.state, target):
-                dongle.change_state(target)
-                await self.dongle_repo.save(dongle)
-        except Exception:
-            logger.exception("Vérification connectivité échouée pour %s", dongle.id)
+        """Vérifie la connectivité et met à jour l'état (délégation à la restauration)."""
+        await self.restoration.verify_connectivity(dongle)

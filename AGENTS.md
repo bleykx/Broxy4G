@@ -74,8 +74,19 @@ retourne alors `ERROR` avec un message métier propre de la forme
 `reset impossible dans l'état <STATE>`, jamais de jargon technique.
 
 - Si un reset est déjà actif, retourner exactement le statut métier `PENDING`.
-- En succès, retourner exactement `DONE`.
+- En succès, retourner exactement `DONE` : `DONE` signifie que l'IP publique est
+  **vérifiée** (le verdict de la sonde d'IP publique est `OK` après la
+  reconnexion, via une boucle d'attente bornée) — pas seulement que le modem a
+  été reconnecté. Si la sonde ne passe jamais `OK`, retourner `ERROR`
+  **sans marquer le dongle `ERROR`** (il reste `ONLINE`) : marquer `ERROR`
+  déclencherait une ré-énumération USB destructive sur un lien qui fonctionne.
 - En échec ou timeout, retourner exactement `ERROR`.
+- Après un `DONE`, une nouvelle demande de reset sur le même dongle renvoie
+  `PENDING` pendant une fenêtre de répit post-`DONE` de 15 s
+  (`BROXY4G_RESET_POST_DONE_SECONDS`) pour ne pas déconnecter l'utilisateur qui
+  vient d'obtenir sa nouvelle IP. Cette fenêtre (en mémoire, distincte du verrou
+  et du throttle) n'est (re)posée que par un `DONE` ; un refus ne la
+  ré-horodate jamais.
 - Le reset est borné dans le temps (`reset_timeout`) et le verrou est libéré
   dans un bloc de nettoyage même en cas de timeout/annulation.
 - Ne jamais lancer deux conteneurs proxy actifs pour le même dongle.

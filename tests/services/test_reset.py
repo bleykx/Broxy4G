@@ -4,10 +4,12 @@ from uuid import uuid4
 
 import pytest
 
+from broxy4g.adapters.connectivity import FakeConnectivity
 from broxy4g.adapters.modem_manager import BearerIpConfig, ModemInfo
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
+from broxy4g.domain.post_done_window import ResetPostDoneWindow
 from broxy4g.domain.proxy import ProxyState
 from broxy4g.services.reset import ResetService
 
@@ -464,3 +466,140 @@ async def test_reset_done_on_cgnat_same_public_ip(
     result = await reset_service.reset(dongle.id)
 
     assert result.status == "DONE"
+
+
+class _ControllableClock:
+    """Horloge contrôlable pour la fenêtre post-DONE."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+class _LatePublicIpConnectivity(FakeConnectivity):
+    """Sonde d'IP publique qui échoue ``misses`` fois avant de retourner l'IP."""
+
+    def __init__(self, misses: int, ip: str):
+        super().__init__()
+        self._misses = misses
+        self._ip = ip
+        self.probe_calls = 0
+
+    async def get_public_ip(self, interface=None):
+        self.interface_calls.append(interface)
+        self.probe_calls += 1
+        if self.probe_calls <= self._misses:
+            return None
+        return self._ip
+
+
+@pytest.mark.asyncio
+async def test_reset_errors_when_public_ip_not_propagated(
+    enrollment_service, connection_service, dongle_repo, proxy_repo, proxy_service,
+    fake_modem, fake_reset_lock,
+):
+    """Gate IP : sans IP publique propagée, le reset est ERROR et le dongle reste ONLINE.
+
+    Marquer ERROR déclencherait une ré-énumération USB destructive (usb_recovery)
+    sur un lien qui fonctionne : l'état du dongle ne doit pas bouger.
+    """
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+    # Pas de ``set_public_ip`` : la sonde échoue à chaque essai.
+    svc = ResetService(
+        dongle_repo, proxy_repo, connection_service, proxy_service, fake_reset_lock,
+        ip_wait_attempts=2, ip_wait_delay=0.0,
+    )
+
+    result = await svc.reset(dongle.id)
+
+    assert result.status == "ERROR"
+    assert "IP publique" in (result.message or "")
+    stored = await dongle_repo.get_by_id(dongle.id)
+    assert stored.state == DongleState.ONLINE
+
+
+@pytest.mark.asyncio
+async def test_reset_done_after_public_ip_appears_late(
+    enrollment_service, connection_service, dongle_repo, proxy_repo, proxy_service,
+    fake_modem, fake_reset_lock, fake_connectivity,
+):
+    """IP publique qui propage en retard : la boucle bornée re-sonde jusqu'à OK → DONE."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+    # Les 2 premières sondes (baseline + métriques) retournent None, puis l'IP.
+    double = _LatePublicIpConnectivity(misses=2, ip="198.51.100.7")
+    connection_service.diagnostics.probe.connectivity = double
+
+    svc = ResetService(
+        dongle_repo, proxy_repo, connection_service, proxy_service, fake_reset_lock,
+        ip_wait_attempts=2, ip_wait_delay=0.0,
+    )
+
+    result = await svc.reset(dongle.id)
+
+    assert result.status == "DONE"
+    assert double.probe_calls >= 3
+
+
+@pytest.mark.asyncio
+async def test_reset_post_done_window_returns_pending_for_new_reset(
+    enrollment_service, connection_service, dongle_repo, proxy_repo, proxy_service,
+    fake_modem, fake_reset_lock, fake_connectivity,
+):
+    """Après un DONE, une nouvelle demande dans la fenêtre post-DONE renvoie PENDING
+    sans re-resetter le modem ; après expiration, le reset aboutit de nouveau."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+    fake_connectivity.set_public_ip("10.64.0.1")
+    clock = _ControllableClock()
+    svc = ResetService(
+        dongle_repo, proxy_repo, connection_service, proxy_service, fake_reset_lock,
+        ip_wait_attempts=1, ip_wait_delay=0.0,
+        done_window=ResetPostDoneWindow(seconds=15.0, clock=clock),
+    )
+
+    first = await svc.reset(dongle.id)
+    assert first.status == "DONE"
+
+    second = await svc.reset(dongle.id)
+    assert second.status == "PENDING"
+    assert "fenêtre de répit" in (second.message or "")
+    assert len(fake_modem.reset_calls) == 1  # la fenêtre ne re-reset pas le matériel
+
+    clock.t = 16.0
+    third = await svc.reset(dongle.id)
+    assert third.status == "DONE"
+    assert len(fake_modem.reset_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_post_done_window_refusals_never_remark(
+    enrollment_service, connection_service, dongle_repo, proxy_repo, proxy_service,
+    fake_modem, fake_reset_lock, fake_connectivity,
+):
+    """Les refus par la fenêtre ne ré-horodent pas : la fenêtre expire au même
+    instant (t + 15 s depuis le DONE), quel que soit le nombre de refus."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+    fake_connectivity.set_public_ip("10.64.0.1")
+    clock = _ControllableClock()
+    svc = ResetService(
+        dongle_repo, proxy_repo, connection_service, proxy_service, fake_reset_lock,
+        ip_wait_attempts=1, ip_wait_delay=0.0,
+        done_window=ResetPostDoneWindow(seconds=15.0, clock=clock),
+    )
+
+    assert (await svc.reset(dongle.id)).status == "DONE"
+    assert (await svc.reset(dongle.id)).status == "PENDING"  # refus à t=0
+    clock.t = 7.0
+    assert (await svc.reset(dongle.id)).status == "PENDING"  # refus consécutif à t=7
+    clock.t = 16.0
+    # Si un refus ré-horodait, la fenêtre expirerait à 7 + 15 = 22, pas 15.
+    assert (await svc.reset(dongle.id)).status == "DONE"

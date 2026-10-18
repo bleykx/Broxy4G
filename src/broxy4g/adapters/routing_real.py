@@ -110,6 +110,30 @@ class RealRouting:
                 ))
         return rules
 
+    async def list_default_routes(self) -> list[RoutingRoute]:
+        """Routes par défaut de la TABLE MAIN : volontairement sans argument ``table``."""
+        result = await self.shell.run(["ip", "-o", "route", "show", "default"])
+        if result.returncode != 0:
+            return []
+
+        routes = []
+        for line in result.stdout.splitlines():
+            match = _DEFAULT_ROUTE_RE.match(line.strip())
+            if not match:
+                continue
+            routes.append(RoutingRoute(
+                table_id=254,  # table main
+                dest="default",
+                via=match.group("via"),
+                dev=match.group("dev"),
+            ))
+        return routes
+
+    async def remove_default_route(self, dev: str) -> bool:
+        """Supprime la route par défaut main de ``dev`` : sans argument ``table``."""
+        result = await self.shell.run(["ip", "route", "del", "default", "dev", dev])
+        return result.returncode == 0
+
     async def list_routes(self, table_id: int) -> list[RoutingRoute]:
         result = await self.shell.run(["ip", "route", "show", "table", str(table_id)])
         if result.returncode != 0:

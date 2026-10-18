@@ -30,6 +30,8 @@ async def _enroll_online_via_app(app, imei, interface, table_id, fwmark) -> Dong
     app.state.modem.set_bearer_ip(interface, BearerIpConfig(
         address="10.0.0.1", prefix=30, gateway="10.0.0.2"
     ))
+    # Le gate de propagation d'IP publique rend DONE seulement si la sonde est OK.
+    app.state.connectivity.set_public_ip("203.0.113.9")
     return dongle
 
 

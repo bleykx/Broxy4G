@@ -20,9 +20,24 @@ def test_render_contains_key_fields():
     assert '"0.0.0.0:31201:3128"' in text
     assert '"/var/lib/broxy4g/proxies/abc/3proxy.cfg:/etc/3proxy/3proxy.cfg:ro"' in text
     assert "ipv4_address: 172.28.0.101" in text
-    assert "subnet: 172.28.0.0/16" in text
-    assert 'com.docker.network.bridge.enable_ip_masquerade: "false"' in text
     assert text.endswith("\n")
+
+
+def test_network_declared_external_only():
+    """Le pont partagé est déclaré ``external: true`` + ``name`` uniquement.
+
+    Compose ignore silencieusement ``driver``/``driver_opts``/``ipam`` sur un
+    réseau externe et avertirait s'il les possédait : le sous-réseau, la
+    passerelle et le masquerade sont portés par la création applicative.
+    """
+    text = render_docker_compose(_spec())
+    assert "external: true" in text
+    assert "name: broxy4g-net" in text
+    assert "driver:" not in text
+    assert "driver_opts:" not in text
+    assert "ipam:" not in text
+    assert "subnet" not in text
+    assert "masquerade" not in text
 
 
 def test_render_reflects_custom_port_and_ip():

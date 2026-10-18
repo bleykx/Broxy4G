@@ -284,7 +284,7 @@ async def test_reconcile_all_order_proxies_network_isolation(reconciliation_work
 async def test_reconcile_all_proxy_network_failure_does_not_break_cycle(
     reconciliation_worker,
 ):
-    """ensure_gateway qui lève : le cycle se termine et l'isolation est appliquée."""
+    """ensure_ready qui lève : le cycle se termine et l'isolation est appliquée."""
 
     async def boom():
         raise RuntimeError("bridge indisponible")
@@ -292,7 +292,7 @@ async def test_reconcile_all_proxy_network_failure_does_not_break_cycle(
     with (
         patch.object(
             reconciliation_worker.proxy_network,
-            "ensure_gateway",
+            "ensure_ready",
             new=AsyncMock(side_effect=boom),
         ) as mock_ensure,
         patch.object(reconciliation_worker, "_reapply_isolation") as mock_isolation,
@@ -302,6 +302,42 @@ async def test_reconcile_all_proxy_network_failure_does_not_break_cycle(
     mock_ensure.assert_awaited_once()
     # L'isolation est réappliquée avant ET après les proxies (idempotente).
     assert mock_isolation.await_count == 2
+
+
+async def test_reconcile_all_ensures_network_before_proxies(reconciliation_worker):
+    """Quand le réseau est absent, ensure_ready le (re)crée AVANT les proxies."""
+    calls: list[str] = []
+
+    async def record_ready():
+        calls.append("ensure_ready")
+
+    async def record_proxies():
+        calls.append("proxies")
+
+    with (
+        patch.object(
+            reconciliation_worker.proxy_network,
+            "ensure_ready",
+            new=AsyncMock(side_effect=record_ready),
+        ),
+        patch.object(
+            reconciliation_worker,
+            "reconcile_proxies",
+            new=AsyncMock(side_effect=record_proxies),
+        ),
+    ):
+        await reconciliation_worker.reconcile_all()
+
+    assert calls == ["ensure_ready", "proxies"]
+
+
+async def test_reconcile_all_creates_missing_network(reconciliation_worker, fake_docker_network):
+    """Réseau Docker absent (reboot) : le pont est recréé par le cycle."""
+    assert await fake_docker_network.inspect("broxy4g-net") is None
+
+    await reconciliation_worker.reconcile_all()
+
+    assert fake_docker_network.created == ["broxy4g-net"]
 
 
 async def test_reconcile_dongle_repairs_uplink_routes_before_proxy(
@@ -388,6 +424,80 @@ async def test_reconcile_proxies_keeps_valid_proxy(
     await reconciliation_worker.reconcile_proxies()
 
     assert await proxy_repo.get_by_id(proxy.id) is not None
+
+
+async def test_reconcile_proxies_repairs_null_hash_proxy(
+    reconciliation_worker, enrollment_service, proxy_repo, fake_docker_compose
+):
+    """Un proxy dont ``password_hash`` est NULL (ligne pré-migration) est réparé puis démarré."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    proxy = await proxy_repo.get_by_dongle_id(dongle.id)
+    assert proxy is not None
+    proxy.password_hash = None
+    await proxy_repo.save(proxy)
+    # Conteneur non running (ex. reboot) : force la branche reprovision.
+    fake_docker_compose.set_state(proxy.container_name, "exited")
+    up_before = sum(1 for c in fake_docker_compose.calls if c[1] == "up")
+
+    await reconciliation_worker.reconcile_proxies()
+
+    reloaded = await proxy_repo.get_by_id(proxy.id)
+    assert reloaded.password_hash is not None and reloaded.password_hash != ""
+    assert reloaded.auth_user
+    assert sum(1 for c in fake_docker_compose.calls if c[1] == "up") == up_before + 1
+
+
+async def test_reconcile_dongle_verifies_connectivity_after_repair(
+    reconciliation_worker, enrollment_service, proxy_repo, fake_docker_compose,
+    fake_modem, fake_iface, fake_connectivity,
+):
+    """Régression : un hash NULL (qui levait ValueError dans reprovision) ne doit
+    plus faire sauter la vérification de connectivité."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    add_modem(fake_modem)
+    fake_connectivity.set_public_ip("1.2.3.4")
+    dongle.change_state(DongleState.CONNECTING)
+    dongle.change_state(DongleState.ONLINE)
+    await reconciliation_worker.dongle_repo.save(dongle)
+    fake_iface.set_address("wwan0", BEARER.address)
+    proxy = await proxy_repo.get_by_dongle_id(dongle.id)
+    assert proxy is not None
+    proxy.password_hash = None
+    await proxy_repo.save(proxy)
+    # Conteneur non running : force la branche reprovision (où levait le ValueError).
+    fake_docker_compose.set_state(proxy.container_name, "exited")
+
+    with patch.object(
+        reconciliation_worker, "_verify_connectivity", new=AsyncMock()
+    ) as mock_verify:
+        await reconciliation_worker.reconcile_dongle(dongle.id)
+
+    mock_verify.assert_awaited_once()
+    reloaded = await proxy_repo.get_by_id(proxy.id)
+    assert reloaded.password_hash is not None and reloaded.password_hash != ""
+
+
+async def test_reconcile_proxies_no_repeated_repair(
+    reconciliation_worker, enrollment_service, proxy_repo, fake_docker_compose
+):
+    """Deux cycles consécutifs : le 2e ne régénère pas les identifiants déjà réparés."""
+    dongle = await _enroll_with_routing(enrollment_service)
+    proxy = await proxy_repo.get_by_dongle_id(dongle.id)
+    assert proxy is not None
+    proxy.password_hash = None
+    await proxy_repo.save(proxy)
+    fake_docker_compose.set_state(proxy.container_name, "exited")
+
+    up_before = sum(1 for c in fake_docker_compose.calls if c[1] == "up")
+    await reconciliation_worker.reconcile_proxies()
+    first = (await proxy_repo.get_by_id(proxy.id)).password_hash
+    assert first
+
+    await reconciliation_worker.reconcile_proxies()
+
+    second = (await proxy_repo.get_by_id(proxy.id)).password_hash
+    assert second == first  # 2e cycle : pas de régénération
+    assert sum(1 for c in fake_docker_compose.calls if c[1] == "up") == up_before + 1
 
 
 async def _seed_local_proxy(proxy_repo, *, interface="eth0", table=10002, fwmark=2):

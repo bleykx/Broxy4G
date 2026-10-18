@@ -1,0 +1,37 @@
+# ------------------------------------------------------------------------------
+# 99-broxy4g-adb.rules — USB access to Android phones for the Broxy4G service.
+#
+# Purpose
+#   The Broxy4G service runs as the unprivileged user `broxy4g`
+#   (deploy/broxy4g.service: User=broxy4g, Group=broxy4g) and drives Android
+#   smartphones over ADB (USB tethering RNDIS, airplane-mode cycles). ADB
+#   talks to the phone through libusb (/dev/bus/usb/…); by default those
+#   nodes are root:root 0660, so only root can open them and `adb` running
+#   as the service user never sees the phone. These rules grant the
+#   `broxy4g` group read/write access to the Android USB devices.
+#
+# Install
+#   sudo cp deploy/99-broxy4g-adb.rules /etc/udev/rules.d/99-broxy4g-adb.rules
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   Re-plug an already-connected phone for the new permissions to apply.
+#   (deploy/install.sh performs these steps automatically.)
+#
+# Adaptation
+#   Every rule sets GROUP="broxy4g", the group of the service user created
+#   by deploy/install.sh. If the service runs under a different user/group
+#   (or a different unit), change GROUP="broxy4g" below to that group.
+#
+# Vendor IDs (ATTR{idVendor}) — Android phones, one rule per vendor:
+#   04e8 Samsung · 18d1 Google · 2717 Xiaomi · 2a70 OnePlus · 12d1 Huawei
+#   22b8 Motorola · 0fce Sony · 1004 LG · 19d2 ZTE
+# ------------------------------------------------------------------------------
+
+SUBSYSTEM=="usb", ATTR{idVendor}=="04e8", MODE="0660", GROUP="broxy4g"  # Samsung
+SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", MODE="0660", GROUP="broxy4g"  # Google
+SUBSYSTEM=="usb", ATTR{idVendor}=="2717", MODE="0660", GROUP="broxy4g"  # Xiaomi
+SUBSYSTEM=="usb", ATTR{idVendor}=="2a70", MODE="0660", GROUP="broxy4g"  # OnePlus
+SUBSYSTEM=="usb", ATTR{idVendor}=="12d1", MODE="0660", GROUP="broxy4g"  # Huawei
+SUBSYSTEM=="usb", ATTR{idVendor}=="22b8", MODE="0660", GROUP="broxy4g"  # Motorola
+SUBSYSTEM=="usb", ATTR{idVendor}=="0fce", MODE="0660", GROUP="broxy4g"  # Sony
+SUBSYSTEM=="usb", ATTR{idVendor}=="1004", MODE="0660", GROUP="broxy4g"  # LG
+SUBSYSTEM=="usb", ATTR{idVendor}=="19d2", MODE="0660", GROUP="broxy4g"  # ZTE

@@ -61,7 +61,8 @@ class TestQueryAuthDisabled:
         )
         assert response.status_code == 200
 
-    async def test_401_www_authenticate_header(self, client):
+    async def test_401_without_www_authenticate(self, client):
         response = await client.get("/api/v1/dongles?user=admin&password=test-pass")
         assert response.status_code == 401
-        assert response.headers.get("WWW-Authenticate") == 'Basic realm="broxy4g"'
+        # Pas de challenge WWW-Authenticate : il déclenche la popup native du navigateur.
+        assert "www-authenticate" not in response.headers

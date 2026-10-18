@@ -8,28 +8,25 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
+from broxy4g.adapters.adb import RealAdb
 from broxy4g.adapters.connectivity_real import RealConnectivity
 from broxy4g.adapters.docker_compose import RealDockerCompose
 from broxy4g.adapters.docker_network import RealDockerNetwork
 from broxy4g.adapters.local_uplink import RealLocalUplink
 from broxy4g.adapters.modem_manager_real import RealModemManager
 from broxy4g.adapters.net_interface import RealInterface
+from broxy4g.adapters.network_manager import RealNetworkManager
 from broxy4g.adapters.nftables_real import RealNftables
 from broxy4g.adapters.routing_real import RealRouting
 from broxy4g.adapters.shell_real import RealShell
-from broxy4g.adapters.usb_device import RealUsbDevice
 from broxy4g.api.access_log import build_access_log_config
 from broxy4g.api.app import create_app
 from broxy4g.domain.reset_states import ResetLock
+from broxy4g.env_config import resolve_adb_path, resolve_usb_recovery_cooldown  # noqa: F401  # ré-exports
 from broxy4g.repositories.database import create_engine, create_session_factory, init_db
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
-from broxy4g.services.proxy_network import ProxyNetworkService
-from broxy4g.services.routing_slot_migration import RoutingSlotMigration
-from broxy4g.services.uplink_routes import UplinkRouteService
-from broxy4g.services.usb_recovery import UsbRecoveryService
-from broxy4g.workers.discovery import DiscoveryWorker
-from broxy4g.workers.reconciliation import ReconciliationWorker
+from broxy4g.workers.runner import run_workers
 
 logger = logging.getLogger(__name__)
 
@@ -75,85 +72,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def resolve_usb_recovery_cooldown() -> float:
-    """Backoff inter-cycles de la récupération USB douce, en secondes.
-
-    Lit ``BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS`` (défaut 300) ; une valeur
-    absente, illisible ou négative retombe sur 300 s (jamais de bornage nul
-    ou absurde accidentel).
-    """
-    default = 300.0
-    raw = os.environ.get("BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS", "300")
-    try:
-        value = float(raw)
-    except ValueError:
-        return default
-    return value if value >= 0 else default
-
-
-async def run_workers(app, stop_event: asyncio.Event, work_dir: str):
-    """Run discovery and reconciliation workers until stopped."""
-    shell = RealShell()
-    
-    # Create real adapters for workers
-    modem = RealModemManager(shell)
-    routing = RealRouting(shell)
-    nft = RealNftables(shell, work_dir=work_dir)
-    connectivity = RealConnectivity(shell)
-    proxy_network = ProxyNetworkService(RealDockerNetwork(shell), RealInterface(shell))
-
-    discovery = DiscoveryWorker(modem, app.state.dongle_repo, apn_source=app.state.apn_source)
-    worker_uplink_routes = UplinkRouteService(modem, routing)
-    usb_recovery = UsbRecoveryService(
-        app.state.dongle_repo,
-        worker_uplink_routes,
-        RealUsbDevice(),
-        reset_lock=app.state.reset_lock,
-        cooldown_seconds=resolve_usb_recovery_cooldown(),
-    )
-    reconciliation = ReconciliationWorker(
-        dongle_repo=app.state.dongle_repo,
-        proxy_repo=app.state.proxy_repo,
-        modem=modem,
-        routing=routing,
-        nft=nft,
-        connectivity=connectivity,
-        connection_service=app.state.connection_service,
-        provisioning=app.state.provisioning,
-        docker_compose=app.state.docker_compose,
-        metrics_snapshot=app.state.metrics_snapshot,
-        uplink_routes=worker_uplink_routes,
-        slot_migration=RoutingSlotMigration(app.state.dongle_repo, app.state.proxy_repo),
-        isolation=app.state.isolation,
-        reset_lock=app.state.reset_lock,
-        local_connections=app.state.local_connections_service,
-        usb_recovery=usb_recovery,
-        proxy_network=proxy_network,
-    )
-
-    async def discovery_loop():
-        while not stop_event.is_set():
-            try:
-                await discovery.discover()
-            except Exception:
-                logger.exception("Discovery error")
-            await asyncio.sleep(10)
-
-    async def reconciliation_loop():
-        while not stop_event.is_set():
-            try:
-                await reconciliation.reconcile_all()
-            except Exception:
-                logger.exception("Reconciliation error")
-            await asyncio.sleep(30)
-
-    tasks = [asyncio.create_task(discovery_loop()), asyncio.create_task(reconciliation_loop())]
-    await stop_event.wait()
-    for t in tasks:
-        t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-
 async def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -181,7 +99,10 @@ async def main():
         nft=RealNftables(RealShell(), work_dir=work_dir),
         connectivity=RealConnectivity(RealShell()),
         docker_compose=RealDockerCompose(RealShell()),
+        docker_network=RealDockerNetwork(RealShell()),
         local_uplink=RealLocalUplink(RealShell()),
+        adb=RealAdb(RealShell(), adb_path=resolve_adb_path()),
+        nm=RealNetworkManager(RealShell()),
         reset_lock=ResetLock(),
         data_dir=os.environ.get("BROXY4G_DATA_DIR", str(db_path.parent / "proxies")),
     )

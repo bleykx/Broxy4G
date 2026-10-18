@@ -29,6 +29,26 @@ class DockerComposeAdapter(Protocol):
     async def remove(self, project: str, compose_dir: str) -> None:
         ...
 
+    async def published_host_ports(self) -> set[int]:
+        ...
+
+
+def parse_published_ports(stdout: str) -> set[int]:
+    """Ports hôte publiés extraits du format ``{{.Ports}}`` de ``docker ps``.
+
+    Lignes séparées par des retours à la ligne, entrées séparées par des
+    virgules : ``0.0.0.0:31201->3128/tcp, 172.28.0.2:80->80/tcp, 9000/tcp``.
+    Seuls les ports **hôte** (avant ``->``) sont retenus ; les ports internes
+    non publiés (``9000/tcp``) sont ignorés.
+    """
+    ports: set[int] = set()
+    for entry in stdout.replace("\n", ",").split(","):
+        host = entry.strip().split("->", 1)[0]
+        _, sep, candidate = host.rpartition(":")
+        if sep and candidate.isdigit():
+            ports.add(int(candidate))
+    return ports
+
 
 class RealDockerCompose:
     def __init__(self, shell: ShellAdapter):
@@ -70,6 +90,18 @@ class RealDockerCompose:
             [*self._base(project, compose_dir), "down", "--remove-orphans", "-v"],
         )
 
+    async def published_host_ports(self) -> set[int]:
+        """Ports hôte publiés par tous les conteneurs (``docker ps -a``).
+
+        Un seul appel borné ; docker indisponible (rc != 0) → ensemble vide.
+        """
+        result = await self.shell.run(
+            ["docker", "ps", "-a", "--format", "{{.Ports}}"], timeout=5.0
+        )
+        if result.returncode != 0:
+            return set()
+        return parse_published_ports(result.stdout)
+
     async def state(self, project: str) -> str | None:
         if not _PROJECT_RE.match(project):
             raise ValueError(f"Nom de projet compose invalide : {project!r}")
@@ -96,9 +128,13 @@ class FakeDockerCompose:
     def __init__(self):
         self.projects: dict[str, str] = {}
         self.calls: list[tuple[str, str]] = []
+        self.published_ports: set[int] = set()
 
     def set_state(self, project: str, state: str) -> None:
         self.projects[project] = state
+
+    async def published_host_ports(self) -> set[int]:
+        return set(self.published_ports)
 
     async def up(self, project: str, compose_dir: str) -> None:
         self.calls.append((project, "up"))

@@ -41,14 +41,17 @@ def _make_service(dongle_repo, proxy_repo, connection_service, proxy_service,
         dongle_repo, proxy_repo, connection_service, proxy_service, fake_reset_lock,
         metrics_snapshot=metrics_snapshot,
         throttle=throttle,
+        ip_wait_attempts=2,
+        ip_wait_delay=0.0,
     )
 
 
 async def test_second_reset_immediately_is_pending_cooldown_without_hardware_reset(
     enrollment_service, fake_modem, dongle_repo, proxy_repo,
-    connection_service, proxy_service, fake_reset_lock, metrics_snapshot,
+    connection_service, proxy_service, fake_reset_lock, metrics_snapshot, fake_connectivity,
 ):
     """1er reset exécuté (DONE) ; 2e immédiat : PENDING cooldown, pas de 2e reset modem."""
+    fake_connectivity.set_public_ip("10.64.0.1")
     dongle = await _enroll_in_state(
         enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
     )
@@ -69,9 +72,10 @@ async def test_second_reset_immediately_is_pending_cooldown_without_hardware_res
 
 async def test_reset_beyond_window_cap_is_error_without_hardware_reset(
     enrollment_service, fake_modem, dongle_repo, proxy_repo,
-    connection_service, proxy_service, fake_reset_lock, metrics_snapshot,
+    connection_service, proxy_service, fake_reset_lock, metrics_snapshot, fake_connectivity,
 ):
     """Plafond de fenêtre atteint : ERROR « refusé », le modem n'est jamais touché."""
+    fake_connectivity.set_public_ip("10.64.0.1")
     dongle = await _enroll_in_state(
         enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
     )

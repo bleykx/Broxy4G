@@ -23,11 +23,12 @@ const App: React.FC = () => {
     try {
       const credentials = btoa(`${user}:${pass}`);
       sessionStorage.setItem('broxy4g_auth', credentials);
-      
-      // Verify credentials with a health check
-      await api.health.get();
+
+      // Verify credentials against the authenticated session endpoint
+      await api.session.verify();
       return true;
     } catch {
+      sessionStorage.removeItem('broxy4g_auth');
       return false;
     }
   };

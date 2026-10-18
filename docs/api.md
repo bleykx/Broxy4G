@@ -27,8 +27,10 @@ This is **disabled by default (fail-closed)** and only read when the
   (even malformed), the query string is never consulted and a `401` is
   returned if the header does not carry valid credentials.
 - Both `user` and `password` query parameters must be present; otherwise the
-  request is rejected with `401 Unauthorized`
-  (`WWW-Authenticate: Basic realm="broxy4g"`).
+  request is rejected with `401 Unauthorized`. Note that 401 responses carry
+  **no** `WWW-Authenticate` header on purpose: that challenge would trigger the
+  browser's native auth popup in the web UI; the caller always supplies the
+  `Authorization: Basic ...` header itself.
 - Credentials are never logged. The uvicorn access log (emitted before any
   FastAPI middleware and containing the full query string) is passed through
   a redacting formatter that replaces the value of sensitive
@@ -53,6 +55,35 @@ Returns the health status of the application.
 }
 ```
 
+This endpoint is **public (no authentication)** on purpose: it is polled by the
+deployment scripts (UI health check in `deploy/install.sh`) and by infrastructure
+probes that have no credentials. It checks process liveness only and verifies
+**nothing** about the caller.
+
+### Session
+
+**GET** `/api/v1/session`
+
+Verifies that the caller's Basic Auth credentials are valid, without acting on
+any resource. This is the endpoint the web UI uses to check a login: it returns
+`200` only when the `Authorization` header carries the configured
+`BROXY4G_API_USER` / `BROXY4G_API_PASSWORD` pair.
+
+Unlike the public `/health` above, this endpoint is **authenticated**: a
+request without credentials, or with a wrong user/password, is rejected with
+`401 Unauthorized` — the response carries **no** `WWW-Authenticate` header
+(deliberate choice, to avoid the browser's native auth popup in the UI; the
+caller supplies `Authorization: Basic ...` explicitly). It must not be used as
+a substitute for `/health`, and `/health` must never be used to verify
+credentials (it would succeed with any caller).
+
+**Response**
+```json
+{
+  "authenticated": true
+}
+```
+
 ### Dongle Management
 
 #### List Dongles
@@ -70,10 +101,15 @@ Returns a list of all registered dongles.
     "state": "ONLINE",
     "interface_name": "wwan0",
     "public_ip": "192.168.1.100",
-    "signal_quality": 85
+    "signal_quality": 85,
+    "transport": "modem"
   }
 ]
 ```
+
+`transport` is `"modem"` (the default) or `"adb"` (an Android smartphone
+tethered over USB — the same dongle resource, a different transport, cf.
+`docs/architecture.md` → *Device Transports*).
 
 #### Get Dongle Details
 
@@ -90,6 +126,7 @@ Returns details for a specific dongle.
   "identity_imei": "123456789012345",
   "identity_usb_serial": "ABC123",
   "identity_iccid": "12345678901234567890",
+  "identity_adb_serial": null,
   "apn": "internet",
   "apn_auth": "user:password",
   "route_table_id": 100,
@@ -118,9 +155,16 @@ Returns details for a specific dongle.
     "public_ip": "37.167.72.57",
     "proxy_health": "healthy",
     "proxy_health_reason": null
-  }
+  },
+  "transport": "modem"
 }
 ```
+
+- `identity_adb_serial` is the ADB serial of a smartphone dongle; `null` for
+  a modem. `transport` is `"modem"` or `"adb"`.
+- For an `adb` dongle the identity is `identity_adb_serial` (the other
+  identity fields are `null`) and `apn` stays `null`: a phone manages its own
+  APN, so no APN is resolved or stored.
 
 > **Signal metrics:** `signal_quality.percent` is always provided by
 > ModemManager. The detailed fields (`rsrp`, `rsrq`, `sinr`, `rssi`) are read
@@ -175,10 +219,33 @@ Returns a list of dongles that are detected but not yet enrolled.
     "identity_iccid": "12345678901234567890",
     "interface_name": "wwan0",
     "suggested_label": "Dongle 345",
-    "suggested_apn": "free"
+    "suggested_apn": "free",
+    "transport": "modem",
+    "identity_adb_serial": null,
+    "model": null
+  },
+  {
+    "identity_imei": null,
+    "identity_usb_serial": null,
+    "identity_iccid": null,
+    "interface_name": null,
+    "suggested_label": "Téléphone SM-A217F",
+    "suggested_apn": null,
+    "transport": "adb",
+    "identity_adb_serial": "R5CT10ABCDE",
+    "model": "SM-A217F"
   }
 ]
 ```
+
+- `transport` is `"modem"` or `"adb"`. `identity_adb_serial` is the ADB
+  serial of a discovered phone (`null` for a modem); `model` is the phone
+  model (ADB `model` field, falling back to `ro.product.model`) and `null`
+  for a modem.
+- Phones are announced only while ADB reports them in the `device` state:
+  `unauthorized` (authorization prompt not accepted on the phone) and
+  `offline` phones are silently ignored and never appear in this list.
+  `suggested_apn` is always `null` for a phone.
 
 `suggested_apn` est résolu depuis la base MBPI (mobile-broadband-provider-info) à
 partir de l'IMSI/SIM et de l'opérateur courant. Il vaut `null` si aucun APN
@@ -197,9 +264,28 @@ Enrolls a new dongle.
   "identity_usb_serial": "ABC123",
   "identity_iccid": "12345678901234567890",
   "label": "Dongle 1234",
-  "apn": "internet"
+  "apn": "internet",
+  "transport": "modem",
+  "identity_adb_serial": null
 }
 ```
+
+- `transport` is optional and defaults to `"modem"`; the only accepted values
+  are `"modem"` and `"adb"` (case-insensitive).
+- `identity_adb_serial` is the ADB serial of an Android smartphone. It is
+  **required** when `transport` is `"adb"` and **forbidden** when `transport`
+  is `"modem"`.
+- At least one identifier is required: `identity_imei`,
+  `identity_usb_serial`, `identity_iccid` or `identity_adb_serial`.
+- An unknown `transport` value returns `422 Unprocessable Entity` with a
+  readable business message
+  (`transport inconnu : « <valeur> » (valeurs acceptées : modem, adb)`).
+
+Enrolling a phone (`"transport": "adb"`, `"identity_adb_serial":
+"<serial>"`, no other identifier, no `apn`) immediately triggers the USB
+tethering activation: a failure of that activation does **not** fail the
+enrollment — the response reflects the device's final state
+(`state: "ERROR"` + `last_error` if the connection failed).
 
 **Response**
 ```json
@@ -210,6 +296,7 @@ Enrolls a new dongle.
   "identity_imei": "123456789012345",
   "identity_usb_serial": "ABC123",
   "identity_iccid": "12345678901234567890",
+  "identity_adb_serial": null,
   "apn": "internet",
   "apn_auth": null,
   "route_table_id": null,
@@ -220,6 +307,7 @@ Enrolls a new dongle.
   "created_at": "2023-01-01T12:00:00Z",
   "updated_at": "2023-01-01T12:00:00Z",
   "metrics": null,
+  "transport": "modem",
   "proxy_credentials": {
     "username": "khmtpznwqrbv",
     "password": "nHkq2z4vXw8mPq6rTn3j"
@@ -279,8 +367,28 @@ action: it is allowed from `ONLINE`, `DEGRADED`, `OFFLINE` and `ERROR`. The
 dongle is moved to `RESETTING` (it stays `RESETTING` until `connect()` moves it
 to `CONNECTING`), then reconnected. The USB re-enumeration can take up to
 ~60 s (the modem reappears ~15-50 s after `mmcli --reset`), so the whole
-operation is wrapped in a bounded timeout (`reset_timeout`, default `300 s`);
-the per-dongle lock is always released on completion, timeout or cancellation.
+operation is wrapped in a bounded timeout (`BROXY4G_RESET_TIMEOUT_SECONDS`,
+default `300 s`); the per-dongle lock is always released on completion, timeout
+or cancellation.
+
+**The reset contract and its status codes (`DONE` / `ERROR` / `PENDING`) are
+unchanged and apply identically to both transports** (`modem` and `adb`).
+For a smartphone the recovery mechanism differs from a modem: instead of a USB
+re-enumeration, the reset performs a bounded airplane-mode radio cycle
+(double `enable`/`disable`) and waits for the phone to come back
+(`adb wait-for-device`); no USB re-enumeration is ever performed on a phone.
+`DONE` still means the public IP has been **verified** by the probe.
+
+`DONE` is only returned **after the public IP has been verified**: once the
+modem is reconnected, the reset waits for the public-IP probe (pinned to the
+bearer's source IP) to reach verdict `OK`. The probe **verdict** is the gate —
+not a change of IP value (see the CGNAT caveat below). Because the public IP
+can lag the bearer by a few seconds, this is a **bounded wait loop** (default
+15 attempts, 2 s apart). If the verdict never becomes `OK`, the reset returns
+`ERROR` ("IP publique non vérifiée après reset (sonde échouée)") **without
+changing the dongle state** (it stays `ONLINE`): marking the dongle `ERROR`
+would trigger a destructive USB re-enumeration (usb recovery) on a link that
+is actually working.
 
 **Response**
 ```json
@@ -292,10 +400,16 @@ the per-dongle lock is always released on completion, timeout or cancellation.
 
 - `status` is one of `DONE`, `ERROR`, `PENDING`.
 - `message` is `null` on success (`DONE`), a fixed explanation on `PENDING`
-  (reset already in progress), and the failure detail when the status is `ERROR`.
-- `PENDING` is returned with HTTP `200` (not `409`) when a reset is already
-  in progress for that dongle: the request was accepted and the reset is
-  being handled by the already-running one.
+  (reset already in progress, or within the post-`DONE` grace window), and the
+  failure detail when the status is `ERROR`.
+- `PENDING` is returned with HTTP `200` (not `409`) in two situations:
+  - a reset is already **in progress** for that dongle (per-dongle lock held):
+    the request was accepted and the reset is being handled by the
+    already-running one;
+  - the request falls within the **post-`DONE` grace window** (default
+    `15 s`, `BROXY4G_RESET_POST_DONE_SECONDS`): a reset just succeeded and the
+    operator should not be disconnected before their new public IP propagates.
+    See the *Post-`DONE` grace window* paragraph below.
 - A `ERROR` with a clean business message (no technical jargon) is returned when
   the dongle is in a state from which a reset is not meaningful — `DISCOVERED`,
   `UNENROLLED` or `CONFIGURING` (the reset needs an already-enrolled dongle).
@@ -310,6 +424,16 @@ requested while a previous executed reset is younger than the cooldown returns
 `ERROR` with a message beginning with `reset refusé`. Refusals never touch the
 hardware. The status set stays exactly `DONE` / `ERROR` / `PENDING` (the GET
 `text/plain` body contract is unchanged).
+
+**Post-`DONE` grace window.** A short grace window (default `15 s`,
+`BROXY4G_RESET_POST_DONE_SECONDS`) follows every `DONE`: a new reset requested
+for the same dongle inside the window returns `PENDING` without re-resetting
+the modem, so the operator is not disconnected right after obtaining their new
+public IP. The window is per-dongle, in-memory, and distinct from both the
+per-dongle lock ("reset **in progress**", consumed by reconciliation and USB
+recovery) and the anti-storm throttle ("rate limiting"). It is (re)started only
+by a `DONE` — a refusal by the window never re-times it. The order of checks is
+throttle → grace window → lock.
 
 **GET variant.** `GET /api/v1/dongles/{id}/reset` is exposed for external
 GET-only tools (Ankabot) that can pass only a URL — combine it with the
@@ -348,7 +472,10 @@ has a usable uplink again — a proxy is never started on a dead uplink.
 **CGNAT caveat.** An identical public IP before and after the reset does **not**
 imply a failure: behind a carrier-grade NAT the operator may assign the same
 public IP to two consecutive sessions. The USB modem reset guarantees a fresh
-data session, so an unchanged *public IP* is a valid `DONE`.
+data session, so an unchanged *public IP* is a valid `DONE`. The `DONE` gate
+therefore looks at the **probe verdict** (did the `curl`-based probe succeed?)
+— not at a change of the IP value. A probe that succeeds with the same IP as
+before is `OK` and yields `DONE`.
 
 #### Reset Dongles (batch)
 
@@ -585,27 +712,49 @@ routing slot. Idempotent.
 
 #### Create Proxy
 
-**POST** `/api/v1/proxies`
+**POST** `/api/v1/dongles/{dongle_id}/proxy`
 
-Creates a new proxy for a dongle.
+Creates a new proxy for a dongle, or returns the existing one unchanged.
 
-**Request**
+**Request** (optional body)
 ```json
 {
-  "dongle_id": "123e4567-e89b-12d3-a456-426614174000",
-  "port": 8080
+  "enabled": true
 }
 ```
+
+- `enabled` is optional and defaults to `true`.
 
 **Response**
 ```json
 {
-  "id": "123e4567-e89b-12d3-a456-426614174000",
-  "dongle_id": "123e4567-e89b-12d3-a456-426614174000",
-  "port": 8080,
-  "state": "CREATED"
+  "proxy": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "dongle_id": "123e4567-e89b-12d3-a456-426614174001",
+    "source_type": "dongle",
+    "source_ref": "123456789012345",
+    "interface_name": null,
+    "container_name": "broxy4g-proxy-123e4567-e89b-12d3-a456-426614174000",
+    "listen_port": 31201,
+    "auth_user": "khmtpznwqrbv",
+    "state": "RUNNING",
+    "enabled": true,
+    "network_ip": "172.28.0.101",
+    "created_at": "2026-10-17T10:00:00Z",
+    "updated_at": "2026-10-17T10:00:05Z"
+  },
+  "password": "one-time-proxy-password"
 }
 ```
+
+- Returns `201 Created` with a one-time `password` when a new proxy is
+  provisioned. The password is returned only once.
+- Returns `200 OK` with `password: null` when the dongle already has a proxy
+  (idempotent — the existing credentials are left unchanged and the running
+  container is not restarted).
+- `state` is one of `STOPPED`, `STARTING`, `RUNNING`, `CRASHED`, `REMOVED`.
+- Returns `404 Not Found` with a clean business message when the dongle is
+  unknown.
 
 #### Start Proxy
 
@@ -648,6 +797,32 @@ Removes a proxy.
   "state": "REMOVING"
 }
 ```
+
+#### Rotate Proxy Credentials
+
+**POST** `/api/v1/proxies/{proxy_id}/rotate`
+
+Rotates the proxy credentials. The proxy password is stored only as a hash
+(`password_hash`), so it can never be retrieved — this endpoint generates a
+new one instead.
+
+**Response**
+```json
+{
+  "proxy": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "auth_user": "khmtpznwqrbv",
+    "state": "RUNNING"
+  },
+  "password": "one-time-proxy-password"
+}
+```
+
+- Issues a new `auth_user` together with a new password.
+- The password is shown **once, in this response only**: only its hash is
+  persisted, never the plaintext — no endpoint can return it again.
+- Existing clients are disconnected and must be updated with the new
+  credentials.
 
 ### Settings
 
@@ -730,5 +905,5 @@ Sending `null` (or an empty value) resets the setting to the default `0.0.0.0`.
 | 403 | Forbidden |
 | 404 | Not Found |
 | 409 | Conflict (e.g., duplicate enrollment) |
-| 422 | Unprocessable Entity (e.g., incomplete identity) |
+| 422 | Unprocessable Entity (e.g., incomplete identity, unknown `transport`) |
 | 500 | Internal Server Error |

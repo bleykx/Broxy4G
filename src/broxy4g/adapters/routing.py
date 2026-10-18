@@ -34,6 +34,12 @@ class RoutingAdapter(Protocol):
     async def list_routes(self, table_id: int) -> list["RoutingRoute"]:
         ...
 
+    async def list_default_routes(self) -> list["RoutingRoute"]:
+        ...
+
+    async def remove_default_route(self, dev: str) -> bool:
+        ...
+
 
 @dataclass
 class RoutingRule:
@@ -59,6 +65,8 @@ class FakeRouting:
         self._rules: list[RoutingRule] = []
         self._source_rules: dict[int, str] = {}
         self._routes: list[RoutingRoute] = []
+        # Routes par défaut de la TABLE MAIN (aucun filtre de table).
+        self._default_routes: list[RoutingRoute] = []
 
     async def add_rule(self, table_id: int, fwmark: int) -> None:
         # Vérifier si la règle existe déjà
@@ -100,6 +108,14 @@ class FakeRouting:
 
     async def list_routes(self, table_id: int) -> list[RoutingRoute]:
         return [r for r in self._routes if r.table_id == table_id]
+
+    async def list_default_routes(self) -> list[RoutingRoute]:
+        return list(self._default_routes)
+
+    async def remove_default_route(self, dev: str) -> bool:
+        before = len(self._default_routes)
+        self._default_routes = [r for r in self._default_routes if r.dev != dev]
+        return len(self._default_routes) < before
 
 
 # Real implementation

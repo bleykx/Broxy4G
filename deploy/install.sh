@@ -55,11 +55,23 @@ polkit.addRule(function(action, subject) {
 POLKIT
 log "PolicyKit rule installed"
 
-# 8. systemd service
+# 8. udev rules (Android USB access for the service user)
+UDEV_RULES_SRC="$REPO_ROOT/deploy/99-broxy4g-adb.rules"
+UDEV_RULES_DST="/etc/udev/rules.d/99-broxy4g-adb.rules"
+if [[ -f "$UDEV_RULES_DST" ]] && cmp -s "$UDEV_RULES_SRC" "$UDEV_RULES_DST"; then
+    log "udev rules up to date"
+else
+    install -m 0644 "$UDEV_RULES_SRC" "$UDEV_RULES_DST"
+    udevadm control --reload-rules
+    udevadm trigger
+    log "udev rules installed (Android USB access for group broxy4g)"
+fi
+
+# 9. systemd service
 cp "$REPO_ROOT/deploy/broxy4g.service" /etc/systemd/system/broxy4g.service
 log "systemd service installed"
 
-# 9. Env file (idempotent upgrade)
+# 10. Env file (idempotent upgrade)
 ENV_FILE="/etc/broxy4g/broxy4g.env"
 if [[ ! -f "$ENV_FILE" ]]; then
     cp "$REPO_ROOT/deploy/broxy4g.env.example" "$ENV_FILE"
@@ -76,7 +88,7 @@ if ! grep -q '^BROXY4G_FRONTEND_DIST=' "$ENV_FILE"; then
     log "Added BROXY4G_FRONTEND_DIST to $ENV_FILE"
 fi
 
-# 10. App install to /opt/broxy4g
+# 11. App install to /opt/broxy4g
 APP_DIR="/opt/broxy4g"
 
 # Stop service before replacing files (first install: unit may not exist yet)
@@ -116,18 +128,18 @@ fi
 "$APP_DIR/.venv/bin/pip" install --quiet --no-cache-dir "$APP_DIR"
 log "Python package installed (non-editable)"
 
-# 11. Docker check
+# 12. Docker check
 if ! command -v docker &>/dev/null; then
     warn "docker not found — proxy containers will not work"
 fi
 
-# 12. systemd
+# 13. systemd
 systemctl daemon-reload
 systemctl enable broxy4g
 systemctl restart broxy4g
 log "Service enabled and restarted"
 
-# 13. Summary + UI health check
+# 14. Summary + UI health check
 STATUS="$(systemctl is-active broxy4g 2>/dev/null || echo unknown)"
 
 # Parse host/port from env file (defaults 0.0.0.0 / 8080)

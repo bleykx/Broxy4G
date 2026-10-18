@@ -30,6 +30,7 @@ export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<{ username: string; password: string } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const applyCredentials = (result: unknown) => {
     const pw = result as ProxyWithPassword | undefined;
@@ -41,8 +42,16 @@ export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({
   const execute = async (action: string, fn: () => Promise<unknown>) => {
     setBusy(action);
     setError(null);
+    setNotice(null);
     try {
-      applyCredentials(await fn());
+      const result = await fn();
+      if (action === 'create') {
+        const pw = result as ProxyWithPassword | undefined;
+        if (pw?.password == null) {
+          setNotice('This dongle already has a proxy — credentials were left unchanged.');
+        }
+      }
+      applyCredentials(result);
       onChanged();
     } catch (e) {
       setError(errorMessage(e));
@@ -82,6 +91,7 @@ export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({
     <div className="card">
       <h3 className="card-title">Proxy Management</h3>
       {error && <p className="card-error">{error}</p>}
+      {notice && <div className="notice notice-warning card-notice">{notice}</div>}
       {proxy ? (
         <>
           <MetricRow label="Container" value={<span className="mono">{proxy.container_name}</span>} />
@@ -101,7 +111,7 @@ export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({
               {busy === 'restart' ? 'Restarting…' : 'Restart'}
             </button>
             <button className="btn" disabled={disabled} onClick={() => openConfirm('rotate')}>
-              View credentials
+              Regenerate credentials
             </button>
             <button className="btn btn-danger-text" disabled={disabled} onClick={() => openConfirm('delete')}>
               Delete

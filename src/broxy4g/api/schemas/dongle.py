@@ -9,6 +9,8 @@ class DongleCreate(BaseModel):
     identity_iccid: str | None = None
     label: str
     apn: str | None = None
+    transport: str = "modem"
+    identity_adb_serial: str | None = None
 
 
 class DongleUpdate(BaseModel):
@@ -49,6 +51,9 @@ class DiscoveredDongle(BaseModel):
     interface_name: str | None = None
     suggested_label: str
     suggested_apn: str | None = None
+    transport: str = "modem"
+    identity_adb_serial: str | None = None
+    model: str | None = None
 
 
 class DongleSummary(BaseModel):
@@ -58,6 +63,7 @@ class DongleSummary(BaseModel):
     interface_name: str | None = None
     public_ip: str | None = None
     signal_quality: int | None = None
+    transport: str = "modem"
 
 
 class DongleDetail(BaseModel):
@@ -67,6 +73,7 @@ class DongleDetail(BaseModel):
     identity_imei: str | None = None
     identity_usb_serial: str | None = None
     identity_iccid: str | None = None
+    identity_adb_serial: str | None = None
     apn: str | None = None
     apn_auth: str | None = None
     route_table_id: int | None = None
@@ -77,3 +84,4 @@ class DongleDetail(BaseModel):
     created_at: str
     updated_at: str
     metrics: DongleMetricsDTO | None = None
+    transport: str = "modem"

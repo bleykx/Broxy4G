@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 from .dongle_states import DongleState, transition
 from .identity import IdentityMaterial
+from .transport import Transport
 
 
 @dataclass
@@ -11,6 +12,7 @@ class Dongle:
     identity: IdentityMaterial
     label: str
     state: DongleState = DongleState.DISCOVERED
+    transport: Transport = Transport.MODEM
     id: UUID = field(default_factory=uuid4)
     apn: str | None = None
     apn_auth: str | None = None  # "none", "pap", "chap"

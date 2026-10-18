@@ -5,6 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
+from broxy4g.domain.transport import Transport
 
 from .database import DongleORM
 
@@ -19,6 +20,7 @@ class DongleRepository:
             identity_imei=dongle.identity.imei,
             identity_usb_serial=dongle.identity.usb_serial,
             identity_iccid=dongle.identity.iccid,
+            identity_adb_serial=dongle.identity.adb_serial,
             identity_key=dongle.identity_key,
             label=dongle.label,
             state=dongle.state.value,
@@ -29,6 +31,7 @@ class DongleRepository:
             interface_name=dongle.interface_name,
             proxy_id=dongle.proxy_id,
             last_error=dongle.last_error,
+            transport=dongle.transport.value,
             created_at=dongle.created_at,
             updated_at=dongle.updated_at,
         )
@@ -39,6 +42,7 @@ class DongleRepository:
                 imei=orm.identity_imei,
                 usb_serial=orm.identity_usb_serial,
                 iccid=orm.identity_iccid,
+                adb_serial=orm.identity_adb_serial,
             ),
             label=orm.label,
             state=DongleState(orm.state),
@@ -50,6 +54,7 @@ class DongleRepository:
             interface_name=orm.interface_name,
             proxy_id=orm.proxy_id,
             last_error=orm.last_error,
+            transport=Transport.from_value(orm.transport),
             created_at=orm.created_at,
             updated_at=orm.updated_at,
         )
@@ -61,6 +66,7 @@ class DongleRepository:
                 existing.identity_imei = dongle.identity.imei
                 existing.identity_usb_serial = dongle.identity.usb_serial
                 existing.identity_iccid = dongle.identity.iccid
+                existing.identity_adb_serial = dongle.identity.adb_serial
                 existing.label = dongle.label
                 existing.state = dongle.state.value
                 existing.apn = dongle.apn
@@ -70,6 +76,7 @@ class DongleRepository:
                 existing.interface_name = dongle.interface_name
                 existing.proxy_id = dongle.proxy_id
                 existing.last_error = dongle.last_error
+                existing.transport = dongle.transport.value
                 existing.updated_at = dongle.updated_at
             else:
                 orm = self._dongle_to_orm(dongle)

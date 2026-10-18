@@ -8,6 +8,7 @@ from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.domain.proxy_credentials import ProxyCredentials
+from broxy4g.domain.transport import Transport
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.settings_repository import AUTO_CREATE_PROXY_KEY, SettingsRepository
 from broxy4g.services.connection import ConnectionService
@@ -33,8 +34,8 @@ class EnrollmentService:
     def __init__(
         self,
         dongle_repo: DongleRepository,
-        connection_service: ConnectionService,
-        proxy_service: ProxyLifecycleService,
+        connection_service: ConnectionService | None = None,
+        proxy_service: ProxyLifecycleService | None = None,
         modem: ModemManagerAdapter | None = None,
         apn_source: ApnResolver | None = None,
         settings_repo: SettingsRepository | None = None,
@@ -47,7 +48,11 @@ class EnrollmentService:
         self.settings_repo = settings_repo
 
     async def enroll(
-        self, identity: IdentityMaterial, label: str, apn: str | None
+        self,
+        identity: IdentityMaterial,
+        label: str,
+        apn: str | None,
+        transport: Transport = Transport.MODEM,
     ) -> EnrollmentResult:
         if not identity.is_complete:
             raise ValueError("Identity material is incomplete")
@@ -56,12 +61,37 @@ class EnrollmentService:
         if existing:
             raise ValueError("already enrolled")
 
-        resolved_apn = apn or await self._resolve_apn(identity)
-        dongle = Dongle(identity=identity, label=label, apn=resolved_apn)
+        if transport is Transport.ADB:
+            # Un téléphone gère son propre APN : aucune résolution ModemManager.
+            resolved_apn = apn
+        else:
+            resolved_apn = apn or await self._resolve_apn(identity)
+        dongle = Dongle(identity=identity, label=label, apn=resolved_apn, transport=transport)
         dongle.change_state(DongleState.CONFIGURING)
         await self.dongle_repo.save(dongle)
         credentials = await self._maybe_create_proxy(dongle)
+        logger.info(
+            "Enrôlement de %s (label=%s, transport=%s)",
+            identity.primary_key, label, transport.value,
+        )
+        if transport is Transport.ADB:
+            dongle = await self._activate_smartphone(dongle)
         return EnrollmentResult(dongle=dongle, proxy_credentials=credentials)
+
+    async def _activate_smartphone(self, dongle: Dongle) -> Dongle:
+        """Active le tethering du téléphone via le service de connexion.
+
+        Un échec ne doit jamais faire échouer l'enrôlement : le dongle est
+        rechargé depuis le dépôt pour refléter son état final réel.
+        """
+        if self.connection_service is None:
+            logger.warning("Aucun ConnectionService : activation du téléphone %s ignorée", dongle.id)
+            return dongle
+        try:
+            await self.connection_service.connect(dongle.id)
+        except Exception:
+            logger.exception("Activation du téléphone %s échouée", dongle.id)
+        return await self.dongle_repo.get_by_id(dongle.id)
 
     async def _maybe_create_proxy(self, dongle: Dongle) -> ProxyCredentials | None:
         """Crée automatiquement le proxy du dongle si l'option est activée.

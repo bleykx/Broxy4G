@@ -68,12 +68,8 @@ async def verify_basic_auth(request: Request) -> None:
 
 
 def raise_unauthorized():
-    # We use a custom exception or just HTTPException with headers
-    # FastAPI's HTTPException doesn't easily allow adding headers to the response
-    # unless we catch it or use a custom handler.
-    # However, for Basic Auth, the browser needs the WWW-Authenticate header.
-    raise HTTPException(
-        status_code=401,
-        detail="Unauthorized",
-        headers={"WWW-Authenticate": "Basic realm=\"broxy4g\""}
-    )
+    # Pas d'en-tête WWW-Authenticate : le challenge déclenche la popup
+    # d'authentification native du navigateur, qui masque l'overlay de login
+    # de la SPA et retient les requêtes en attente de réponse. L'auth est
+    # portée explicitement par l'en-tête Authorization fourni par l'appelant.
+    raise HTTPException(status_code=401, detail="Unauthorized")

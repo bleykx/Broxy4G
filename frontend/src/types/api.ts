@@ -1,7 +1,12 @@
+export type DongleTransport = 'modem' | 'adb';
+
 export interface DiscoveredDongle {
   identity_imei: string | null;
   identity_usb_serial: string | null;
   identity_iccid: string | null;
+  identity_adb_serial: string | null;
+  transport: string;
+  model: string | null;
   interface_name: string | null;
   suggested_label: string;
   suggested_apn: string | null;
@@ -18,9 +23,20 @@ export interface DongleSummary {
   id: string;
   label: string;
   state: DongleState;
+  transport: string;
   interface_name: string;
   public_ip: string | null;
   signal_quality: number | null;
+}
+
+export interface DongleEnrollmentRequest {
+  label: string;
+  transport: DongleTransport;
+  apn?: string;
+  identity_imei?: string | null;
+  identity_usb_serial?: string | null;
+  identity_iccid?: string | null;
+  identity_adb_serial?: string | null;
 }
 
 export interface DongleMetrics {
@@ -48,6 +64,7 @@ export interface DongleDetail extends DongleSummary {
   identity_imei: string | null;
   identity_usb_serial: string | null;
   identity_iccid: string | null;
+  identity_adb_serial: string | null;
   apn: string;
   apn_auth: string | null;
   route_table_id: number;

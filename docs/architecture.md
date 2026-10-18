@@ -142,6 +142,19 @@ et ne touche **jamais** le matériel (pas de reset modem, pas de changement
 d'état du dongle) ; l'historique est en mémoire (un redémarrage du service le
 réinitialise).
 
+**Gate d'IP publique et fenêtre post-DONE** : `DONE` n'est renvoyé que si la
+sonde d'IP publique (épinglée à l'IP source du bearer, verdict tri-état — voir
+`UplinkProbe`) atteint `OK` après la reconnexion, via une boucle d'attente
+bornée. Si elle ne passe jamais `OK`, le reset renvoie `ERROR` **sans marquer
+le dongle `ERROR`** (il reste `ONLINE`) : le marquer déclencherait une
+ré-énumération USB destructive (usb recovery) sur un lien qui fonctionne.
+Le critère est le verdict de sonde, pas le delta d'IP (caveat CGNAT). Après un
+`DONE`, une fenêtre de répit par dongle en mémoire (domain/post_done_window.py,
+défaut 15 s) renvoie `PENDING` à toute nouvelle demande sans re-resetter le
+matériel ; elle est (re)posée seulement par un `DONE` (un refus ne la
+ré-horodate jamais) et est distincte du verrou et du throttle. Ordre des
+vérifications : throttle → fenêtre post-DONE → verrou.
+
 ONLINE    ──(reset)───► RESETTING
 DEGRADED  ──(reset)───► RESETTING
 OFFLINE   ──(reset)───► RESETTING
@@ -280,12 +293,29 @@ CRASHED ──(restart)───► STARTING
           ──(remove)───► REMOVED
 ```
 
+### Proxy Shared Docker Network
+
+Tous les conteneurs 3proxy partagent un unique pont Docker
+(`broxy4g-net`, `172.28.0.0/16`). Ce pont est créé et géré **par
+l'application** : `ProxyNetworkService.ensure_ready` (`services/`) crée le
+réseau s'il est absent (`DockerNetworkAdapter.create_network`,
+`adapters/`, idempotent) et répare la passerelle du bridge ; les fichiers
+compose de chaque proxy le déclarent `external: true`. Un pont existant
+n'est jamais supprimé ni recréé. Détails : `docs/networking.md`
+(« Création et auto-réparation du bridge du réseau proxy »).
+
 ## Identity Strategy
 
 Dongles are identified by a stable hardware identity, in order of preference:
 1. IMEI (International Mobile Equipment Identity)
 2. USB Serial Number
-3. ICCID (Integrated Circuit Card ID)
+3. ADB Serial (smartphone dongles, e.g. a phone with no readable IMEI/ICCID)
+4. ICCID (Integrated Circuit Card ID)
+
+The full identity material is persisted, including the ADB serial
+(`identity_adb_serial` column), so an ADB-only identity survives a
+database round trip (reboot, restart, re-enrollment) without losing its
+`identity_key`.
 
 This ensures that a dongle can be consistently identified even after reboots, USB unplugging/replugging, or other system changes.
 
@@ -296,3 +326,112 @@ persistant. Le nom d'interface (assigné par le noyau : `wwan0`, `wwx0`, …)
 est résolu à la lecture via sysfs (netdev rattaché au périphérique USB du
 modem) et persisté sur le dongle comme simple confort d'exploitation — il
 n'est jamais utilisé pour l'identifier.
+
+## Device Transports
+
+Un « dongle » est une **entité unique** (`domain/dongle.py`, `Dongle`) portant
+un champ `transport` (`domain/transport.py`, `Transport`) à deux valeurs :
+`MODEM` (valeur par défaut) ou `ADB` (téléphone Android en partage de
+connexion USB). Il n'existe pas de ressource parallèle « téléphone » : même
+entité, même machine à états, mêmes routes API, mêmes tables de routage —
+seul le chemin d'uplink et la stratégie de récupération diffèrent selon le
+transport.
+
+### Identité
+
+L'ADB serial entre dans la stratégie d'identité de la même façon que les
+autres identifiants : priorité **IMEI > numéro de série USB > ADB serial >
+ICCID** (`domain/identity.py`, `primary_key`), et le ADB serial est **persisté**
+(colonne `identity_adb_serial`) : une identité ADB-only survit donc aux
+allers-retours base de données avec sa clé primaire intacte. Pour un téléphone,
+l'ADB serial est en pratique toujours la clé primaire (pas d'IMEI ni d'ICCID
+exposés). L'application n'a pas besoin de l'IMEI du téléphone pour l'identifier.
+
+### Découverte
+
+Le worker de découverte interroge `adb devices -l` (`adapters/adb.py`,
+`list_devices`) et n'annonce que les appareils dont l'état est `device` :
+les états `unauthorized` et `offline` sont **ignorés silencieusement**
+(`services/discovery.py`, `_discover_phones`). Chaque téléphone annoncé est
+un dongle découvert avec `transport=adb`, `identity_adb_serial` = serial ADB,
+`interface_name=None` (le netdev n'existe que si le partage USB est actif) et
+`model` (champ ADB `model:`, sinon la propriété `ro.product.model`). Un
+échec du serveur ADB (absent, binaire manquant) est journalisé et n'annonce
+aucun téléphone, sans casser le cycle.
+
+### Enrôlement
+
+- Un téléphone **gère son propre APN** : l'enrôlement d'un dongle ADB ne
+  résout **aucun** APN (`services/enrollment.py`) — la base MBPI n'est
+  consultée que pour les transports modem.
+- L'enrôlement **déclenche automatiquement** l'activation du partage USB
+  (tethering RNDIS) : le service passe le dongle `CONFIGURING`, puis
+  `CONNECTING`, puis `ONLINE` si le bearer est établi.
+- Un échec de cette activation **ne fait jamais échouer l'enrôlement** : le
+  dongle est rechargé depuis le dépôt et reflète son état final réel
+  (`ERROR` avec `last_error` si la connexion a échoué, `CONFIGURING` sinon) ;
+  la réconciliation relancera la connexion au cycle suivant.
+
+### Cycle de vie et récupération par transport
+
+Les transitions d'état sont **identiques** aux deux transports (`CONNECTING →
+ONLINE / ERROR`, etc.). Les différences portent sur le chemin de connexion et
+la récupération :
+
+- **Connexion** (`services/smartphone_connection.py`) : activation du
+  tethering (`svc usb setFunctions rndis`, vérification bornée de
+  `sys.usb.state` — cf. `docs/deployment.md`), résolution du netdev RNDIS par
+  sysfs (jamais de nom codé en dur), profil NetworkManager sans route par
+  défaut, bail DHCP converti en configuration du bearer, puis les mêmes
+  artefacts de table dédiée qu'un modem (voir `docs/networking.md`).
+- **Récupération douce** (`workers/adb_soft_recovery.py`) : un dongle ADB ne
+  subit **JAMAIS** de ré-énumération USB (le bus USB du téléphone n'est pas le
+  problème ; c'est le netdev RNDIS qui est instable). La récupération est une
+  **attente bornée puis une relance bornée du serveur adb** :
+  - `adb wait-for-device` **borné** (timeout par défaut 30 s) : attendre que
+    l'appareil revienne à l'état `device`. S'il revient, tout est bon, **aucune
+    relance**.
+  - Si l'attente échoue, **escalade d'une seule relance bornée du serveur adb**
+    (`RealAdb.restart_server()` = `adb kill-server` (échec toléré),
+    `adb start-server` (timeout), puis `adb reconnect offline`), **puis
+    re-attente** du device. La relance est journalisée comme action
+    d'administration (`ACTION ADMIN`, même convention que le ré-épinglage
+    d'interface). Le WARNING d'échec n'est émis qu'**après** l'échec de la
+    tentative escaladée ; aucune exception ne s'échappe du worker.
+  - **Pourquoi relancer le serveur (cas prouvé sur matériel, reboot)** : le
+    serveur adb est démarré par l'application au boot, **avant** l'énumération
+    USB du téléphone, et reste alors **aveugle** (`adb devices` vide) alors que
+    l'interface ADB est bien présente dans sysfs. Un serveur **neuf**, démarré
+    après l'énumération, voit immédiatement le device. Sans relance, toute
+    commande ADB (tethering, reset, disconnect) resterait morte — alors que le
+    chemin de données (routes/table/fwmark/proxy) est restauré par le reste de
+    la reconciliation (priorité n°2 : reconciliation fiable après reboot).
+  - **Cooldown en mémoire par serial** (défaut 60 s, borne `restart_cooldown`,
+    horloge injectable) : une relance échouée ou réussie ne retentée pas à
+    **chaque** cycle de reconciliation sur un device réellement absent, ce qui
+    éviterait une tempête de `adb kill-server`/`start-server`. Distinct de
+    l'attente bornée ; gardé en mémoire seulement (un redémarrage du processus
+    autorise une relance immédiate).
+  - L'interface est en parallèle **ré-épinglee via sysfs** à chaque cycle (le
+    netdev peut changer de nom sans ré-énumération). Le modem, lui, conserve la
+    ré-énumération USB (`UsbRecoveryService`) documentée plus haut.
+
+### Reset d'un téléphone
+
+Le reset est une **action de récupération** exactement comme pour un modem
+(mêmes états d'origine, mêmes statuts métier) ; seule la mécanique diffère :
+
+- Pas de ré-énumération USB : le reset coupe le profil NetworkManager puis
+  effectue un **double cycle mode avion**
+  (`cmd connectivity airplane-mode enable/disable`, deux fois) pour forcer une
+  nouvelle session cellulaire, attend le retour de l'appareil
+  (`adb wait-for-device` borné), puis relance la connexion complète.
+- `DONE` a **exactement** le même sens : l'IP publique est **vérifiée** par la
+  sonde (verdict `OK` après reconnexion, boucle d'attente bornée) — pas
+  simplement la reconnexion du téléphone. Si la sonde ne passe jamais `OK`, le
+  reset renvoie `ERROR` **sans marquer le dongle `ERROR`** (il reste `ONLINE`)
+  : le marquer déclencherait une récupération sur un lien qui fonctionne.
+- `PENDING` si un reset est déjà en cours (verrou), dans le cooldown ou la
+  fenêtre post-`DONE` ; `ERROR` en échec ou timeout. Le verrou est libéré dans
+  un bloc `finally`. Rien d'autre ne change : verrou, throttle anti-tempête et
+  fenêtre post-`DONE` s'appliquent identiquement au deux transports.

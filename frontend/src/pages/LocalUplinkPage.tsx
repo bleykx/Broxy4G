@@ -41,7 +41,11 @@ export const LocalUplinkPage: React.FC = () => {
       if (result.password != null) {
         setCredentials({ username: result.proxy.auth_user ?? '', password: result.password });
       }
-      setNotice({ kind: 'success', text: `Enrolled ${conn.interface_name}.` });
+      setNotice(
+        result.password == null
+          ? { kind: 'warning', text: 'Interface already enrolled — proxy credentials were left unchanged.' }
+          : { kind: 'success', text: `Enrolled ${conn.interface_name}.` },
+      );
       await load();
     } catch (e) {
       setNotice({ kind: 'error', text: errorMessage(e) });

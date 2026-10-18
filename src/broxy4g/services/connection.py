@@ -1,4 +1,5 @@
 import logging
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from broxy4g.adapters.connectivity import ConnectivityAdapter
@@ -8,12 +9,18 @@ from broxy4g.adapters.nftables import NftablesAdapter
 from broxy4g.adapters.routing import RoutingAdapter
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
+from broxy4g.domain.transport import Transport
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.services.dongle_diagnostics import DongleDiagnostics, DongleMetrics
+from broxy4g.services.dongle_slot import ensure_routing_slot
 from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.routing_allocator import RoutingAllocator
+from broxy4g.services.uplink_probe import PublicIpVerdict
 from broxy4g.services.uplink_routes import UplinkRouteService
 from broxy4g.services.uplink_session import UplinkSession
+
+if TYPE_CHECKING:
+    from broxy4g.services.smartphone_connection import SmartphoneConnectionService
 
 __all__ = ["ConnectionService", "DongleMetrics"]
 
@@ -36,6 +43,7 @@ class ConnectionService:
         ip_wait_delay: float = 2.0,
         modem_wait_attempts: int = 60,
         modem_wait_delay: float = 1.5,
+        smartphone: "SmartphoneConnectionService | None" = None,
     ):
         self.dongle_repo = dongle_repo
         self.modem = modem
@@ -46,6 +54,7 @@ class ConnectionService:
         self.allocator = allocator
         self.uplink_routes = uplink_routes
         self.isolation = isolation
+        self.smartphone = smartphone
         self.diagnostics = DongleDiagnostics(dongle_repo, modem, iface, connectivity, uplink_routes)
         self.uplink_session = UplinkSession(
             modem, iface, routing, uplink_routes,
@@ -68,6 +77,11 @@ class ConnectionService:
 
     async def connect(self, dongle_id: UUID) -> Dongle:
         dongle = await self._load(dongle_id)
+        if dongle.transport is Transport.ADB:
+            # Dongle téléphone : le cycle de vie est géré par le service ADB.
+            if self.smartphone is None:
+                return await self._fail_connect(dongle, dongle_id, "transport ADB non configuré")
+            return await self.smartphone.connect(dongle)
         dongle.change_state(DongleState.CONNECTING)
 
         # Resolve modem to handle USB port changes
@@ -135,6 +149,14 @@ class ConnectionService:
 
     async def disconnect(self, dongle_id: UUID) -> Dongle:
         dongle = await self._load(dongle_id)
+        if dongle.transport is Transport.ADB:
+            if self.smartphone is None:
+                logger.error(
+                    "disconnect dongle %s : transport ADB non configuré, dongle non modifié",
+                    dongle_id,
+                )
+                return dongle
+            return await self.smartphone.disconnect(dongle)
         await self.uplink_session.teardown(dongle)
         dongle.change_state(DongleState.OFFLINE)
         await self.dongle_repo.save(dongle)
@@ -148,6 +170,13 @@ class ConnectionService:
         tout le reset (teardown sans OFFLINE, verrou de reset tenu).
         """
         dongle = await self._load(dongle_id)
+        if dongle.transport is Transport.ADB:
+            if self.smartphone is None:
+                logger.error(
+                    "reset dongle %s : transport ADB non configuré, dongle non modifié", dongle_id
+                )
+                return dongle
+            return await self.smartphone.reset(dongle)
         modem = await self._resolve_modem(dongle)
         if not modem:
             dongle.fail(f"modem introuvable (IMEI={dongle.identity.imei}) pour reset")
@@ -174,6 +203,13 @@ class ConnectionService:
         être non vide ET présente sur l'interface du modem. Toute exception
         → ``False`` (échec sûr : on reconnecte plutôt que de sous-estimer).
         """
+        if dongle.transport is Transport.ADB:
+            if self.smartphone is None:
+                logger.error(
+                    "bearer_is_live dongle %s : transport ADB non configuré", dongle.id
+                )
+                return False
+            return await self.smartphone.bearer_is_live(dongle)
         try:
             modem = await self._resolve_modem(dongle)
             if modem is None or modem.interface_name is None:
@@ -192,6 +228,9 @@ class ConnectionService:
     async def get_public_ip(self, dongle_id: UUID) -> str | None:
         return await self.diagnostics.get_public_ip(dongle_id)
 
+    async def get_public_ip_verdict(self, dongle_id: UUID) -> PublicIpVerdict:
+        return await self.diagnostics.get_public_ip_verdict(dongle_id)
+
     async def get_session_id(self, dongle_id: UUID) -> str | None:
         return await self.diagnostics.get_session_id(dongle_id)
 
@@ -199,18 +238,10 @@ class ConnectionService:
         return await self.uplink_routes.resolve_modem(dongle)
 
     async def _ensure_routing(self, dongle: Dongle) -> None:
-        """Attribue (une fois) table de routage + fwmark au dongle.
-
-        L'allocateur partagé (dongles + proxies) garantit l'unicité du slot.
-        """
-        if dongle.route_table_id and dongle.fwmark:
-            return
-        table_id, fwmark = await self.allocator.allocate()
-        dongle.route_table_id = table_id
-        dongle.fwmark = fwmark
-        await self.dongle_repo.save(dongle)
-        # Plancher anti-fuite dès l'allocation (default unreachable).
-        await self.routing.add_barrier_route(table_id)
+        """Attribue (une fois) table de routage + fwmark (délégation à ``dongle_slot``)."""
+        await ensure_routing_slot(
+            dongle, allocator=self.allocator, routing=self.routing, repo=self.dongle_repo
+        )
 
     async def _load(self, dongle_id: UUID) -> Dongle:
         dongle = await self.dongle_repo.get_by_id(dongle_id)

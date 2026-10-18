@@ -1,6 +1,9 @@
-"""Tests pour l'adaptateur d'inspection des réseaux Docker (device bridge)."""
+"""Tests pour l'adaptateur de réseaux Docker (inspection, création, IP attachées)."""
+
+import pytest
 
 from broxy4g.adapters.docker_network import (
+    _ATTACHED_IPS_FORMAT,
     _INSPECT_FORMAT,
     DockerNetworkInfo,
     FakeDockerNetwork,
@@ -9,6 +12,15 @@ from broxy4g.adapters.docker_network import (
 from broxy4g.adapters.shell_real import FakeShell, ShellResult
 
 COMMAND = ["docker", "network", "inspect", "broxy4g-net", "--format", _INSPECT_FORMAT]
+CREATE_COMMAND = [
+    "docker", "network", "create",
+    "--driver", "bridge",
+    "--subnet", "172.28.0.0/16",
+    "--gateway", "172.28.0.1",
+    "--opt", "com.docker.network.bridge.enable_ip_masquerade=false",
+    "broxy4g-net",
+]
+ATTACHED_COMMAND = ["docker", "network", "inspect", "broxy4g-net", "--format", _ATTACHED_IPS_FORMAT]
 
 
 def make_shell(stdout: str, returncode: int = 0) -> FakeShell:
@@ -63,6 +75,64 @@ async def test_inspect_empty_subnet_and_gateway_become_none():
     assert info.gateway is None
 
 
+class TestCreateNetwork:
+    async def test_nominal_creation(self):
+        shell = FakeShell()
+        shell.set_response(CREATE_COMMAND, ShellResult(0, "abc123networkid", ""))
+        adapter = RealDockerNetwork(shell)
+
+        await adapter.create_network("broxy4g-net", "172.28.0.0/16", "172.28.0.1")
+
+        assert shell.calls == [(CREATE_COMMAND, 30.0)]
+
+    async def test_already_exists_is_silent_success(self):
+        """Réseau présent (autre instance) : rc != 0 + « already exists » → OK."""
+        shell = FakeShell()
+        shell.set_response(
+            CREATE_COMMAND,
+            ShellResult(
+                1, "",
+                'Error response from daemon: network with name broxy4g-net '
+                'already exists',
+            ),
+        )
+        adapter = RealDockerNetwork(shell)
+
+        await adapter.create_network("broxy4g-net", "172.28.0.0/16", "172.28.0.1")  # ne lève pas
+
+    async def test_other_error_raises(self):
+        shell = FakeShell()
+        shell.set_response(CREATE_COMMAND, ShellResult(1, "", "permission denied"))
+        adapter = RealDockerNetwork(shell)
+
+        with pytest.raises(RuntimeError, match="docker network create failed"):
+            await adapter.create_network("broxy4g-net", "172.28.0.0/16", "172.28.0.1")
+
+
+class TestAttachedIps:
+    async def test_parses_real_format_with_cidr_prefix(self):
+        shell = FakeShell()
+        shell.set_response(
+            ATTACHED_COMMAND,
+            ShellResult(0, "172.28.0.103/16 172.28.0.101/16 172.28.0.102/16 \n", ""),
+        )
+        adapter = RealDockerNetwork(shell)
+
+        ips = await adapter.attached_ips("broxy4g-net")
+
+        assert ips == {"172.28.0.101", "172.28.0.102", "172.28.0.103"}
+        assert shell.calls == [(ATTACHED_COMMAND, 10.0)]
+
+    async def test_empty_output(self):
+        shell = FakeShell()
+        shell.set_response(ATTACHED_COMMAND, ShellResult(0, " \n", ""))
+        assert await RealDockerNetwork(shell).attached_ips("broxy4g-net") == set()
+
+    async def test_nonzero_returncode_yields_empty_set(self):
+        shell = FakeShell()  # par défaut : rc=1
+        assert await RealDockerNetwork(shell).attached_ips("broxy4g-net") == set()
+
+
 async def test_fake_docker_network_tracks_calls_and_removal():
     fake = FakeDockerNetwork()
     info = DockerNetworkInfo(
@@ -80,3 +150,23 @@ async def test_fake_docker_network_tracks_calls_and_removal():
     fake.remove("broxy4g-net")
     assert await fake.inspect("broxy4g-net") is None
     assert fake.calls == ["broxy4g-net", "broxy4g-net", "broxy4g-net"]
+
+
+async def test_fake_create_network_registers_network():
+    fake = FakeDockerNetwork()
+    assert await fake.inspect("broxy4g-net") is None
+
+    await fake.create_network("broxy4g-net", "172.28.0.0/16", "172.28.0.1")
+
+    assert fake.created == ["broxy4g-net"]
+    info = await fake.inspect("broxy4g-net")
+    assert info is not None
+    assert info.subnet == "172.28.0.0/16"
+    assert info.gateway == "172.28.0.1"
+
+
+async def test_fake_attached_ips():
+    fake = FakeDockerNetwork()
+    assert await fake.attached_ips("broxy4g-net") == set()
+    fake.set_attached_ips("broxy4g-net", {"172.28.0.101"})
+    assert await fake.attached_ips("broxy4g-net") == {"172.28.0.101"}

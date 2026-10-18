@@ -1,10 +1,8 @@
 """Provisioning d'un proxy 3proxy : port, identifiants, conteneur, cycle de vie.
 
 Orchestre les briques domaine/adaptateurs/repositories pour créer, recréer ou
-supprimer l'instance complète d'un proxy, en restant idempotent par source. La
-matérialisation des fichiers (cfg + compose) est déléguée à ``ProxyMaterializer``.
-Expose aussi les primitives d'exécution (``up``/``down``) réutilisées par le
-service de cycle de vie.
+supprimer l'instance d'un proxy, idempotent par source. La matérialisation
+(cfg + compose) est déléguée à ``ProxyMaterializer`` ; expose ``up``/``down``.
 """
 
 import logging
@@ -18,9 +16,11 @@ from broxy4g.domain.proxy_network import network_ip_for_port
 from broxy4g.repositories.allowed_host_repository import AllowedHostRepository
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
+from broxy4g.services.proxy_credential_repair import ensure_credentials
 from broxy4g.services.proxy_files import ProxyFileWriter
 from broxy4g.services.proxy_listen import ProxyListenService
 from broxy4g.services.proxy_materializer import ProxyMaterializer
+from broxy4g.services.proxy_network import ProxyNetworkService
 from broxy4g.services.proxy_ports import PortAllocator
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,7 @@ class ProxyProvisioningService:
         host_sources: list[str] | None = None,
         *,
         listen: ProxyListenService | None = None,
+        network: ProxyNetworkService | None = None,
     ):
         self._proxy_repo = proxy_repo
         self._dongle_repo = dongle_repo
@@ -55,6 +56,7 @@ class ProxyProvisioningService:
         self._docker_compose = docker_compose
         self._port_allocator = port_allocator
         self._files = files
+        self._network = network
         self._materializer = ProxyMaterializer(
             allowed_host_repo, files, docker_compose, listen, host_sources
         )
@@ -81,12 +83,22 @@ class ProxyProvisioningService:
             proxy.touch()
 
     async def up(self, proxy: Proxy) -> None:
-        """Active le proxy, (re)écrit ses fichiers puis démarre son conteneur."""
+        """Active le proxy, (re)écrit ses fichiers puis démarre son conteneur.
+
+        Le réseau Docker partagé est garanti exploitable (``ensure_ready``)
+        **avant** le ``docker compose up`` : sans le pont, l'attachement du
+        conteneur à l'IP statique échouerait.
+        """
         proxy.enabled = True
+        if ensure_credentials(proxy):
+            proxy.touch()
+            await self._proxy_repo.save(proxy)
         await self.materialize(proxy)
         if proxy.state not in (ProxyState.RUNNING, ProxyState.STARTING):
             self._to_state(proxy, ProxyState.STARTING)
             await self._proxy_repo.save(proxy)
+        if self._network is not None:
+            await self._network.ensure_ready()
         try:
             await self._docker_compose.up(proxy.container_name, self._files.paths.compose_dir(proxy.id))
         except Exception:
@@ -173,8 +185,7 @@ class ProxyProvisioningService:
 
     async def reprovision(self, proxy_id: UUID) -> Proxy:
         proxy = await self._require(proxy_id)
-        if not proxy.password_hash:
-            raise ValueError(f"Proxy {proxy_id} sans hash de mot de passe : reprovision impossible")
+        ensure_credentials(proxy)
         await self.materialize(proxy)
         proxy.touch()
         await self._proxy_repo.save(proxy)

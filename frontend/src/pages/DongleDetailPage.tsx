@@ -4,24 +4,19 @@ import { api } from '../lib/api';
 import { errorMessage } from '../lib/errors';
 import { DongleDetail, ProxyDetail } from '../types/api';
 import { StateBadge } from '../components/StateBadge';
+import { TransportBadge } from '../components/TransportBadge';
+import { isPhoneTransport } from '../lib/transport';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ProxyManagementCard } from '../components/ProxyManagementCard';
 import { ProxyAllowedHostsCard } from '../features/proxies/ProxyAllowedHostsCard';
+import { DongleMetricsCard } from '../features/dongles/DongleMetricsCard';
 import { ResetIpControl } from '../components/ResetIpControl';
 import { MetricRow } from '../components/MetricRow';
-import { ProxyHealth } from '../components/ProxyHealth';
 import { useCopyToClipboard } from '../lib/useCopyToClipboard';
 
 type Notice = { kind: 'success' | 'warning' | 'error'; text: string } | null;
 
 interface EditFormState { label: string; apn: string; apn_auth: string }
-
-const signalTone = (quality: number | null): string => {
-  if (quality == null) return 'var(--state-offline)';
-  if (quality >= 60) return 'var(--state-online)';
-  if (quality >= 30) return 'var(--state-degraded)';
-  return 'var(--state-error)';
-};
 
 const ErrorDetailPanel: React.FC<{ detail: string | null }> = ({ detail }) => (
   <div className="error-panel" role="alert">
@@ -36,10 +31,11 @@ const ErrorDetailPanel: React.FC<{ detail: string | null }> = ({ detail }) => (
 
 const EditConfigForm: React.FC<{
   form: EditFormState;
+  isPhone: boolean;
   saving: boolean;
   onChange: (form: EditFormState) => void;
   onSubmit: (e: React.FormEvent) => void;
-}> = ({ form, saving, onChange, onSubmit }) => (
+}> = ({ form, isPhone, saving, onChange, onSubmit }) => (
   <form onSubmit={onSubmit} className="card edit-form">
     <h3 className="card-title">Configuration</h3>
     <div className="form-grid">
@@ -48,20 +44,24 @@ const EditConfigForm: React.FC<{
         <input id="edit-label" className="input" value={form.label}
           onChange={e => onChange({ ...form, label: e.target.value })} />
       </div>
-      <div className="form-group">
-        <label htmlFor="edit-apn">APN</label>
-        <input id="edit-apn" className="input" value={form.apn}
-          onChange={e => onChange({ ...form, apn: e.target.value })} />
-      </div>
-      <div className="form-group">
-        <label htmlFor="edit-apn-auth">APN Auth</label>
-        <select id="edit-apn-auth" className="input" value={form.apn_auth}
-          onChange={e => onChange({ ...form, apn_auth: e.target.value })}>
-          <option value="none">none</option>
-          <option value="pap">pap</option>
-          <option value="chap">chap</option>
-        </select>
-      </div>
+      {!isPhone && (
+        <>
+          <div className="form-group">
+            <label htmlFor="edit-apn">APN</label>
+            <input id="edit-apn" className="input" value={form.apn}
+              onChange={e => onChange({ ...form, apn: e.target.value })} />
+          </div>
+          <div className="form-group">
+            <label htmlFor="edit-apn-auth">APN Auth</label>
+            <select id="edit-apn-auth" className="input" value={form.apn_auth}
+              onChange={e => onChange({ ...form, apn_auth: e.target.value })}>
+              <option value="none">none</option>
+              <option value="pap">pap</option>
+              <option value="chap">chap</option>
+            </select>
+          </div>
+        </>
+      )}
     </div>
     <button className="btn btn-primary" type="submit" disabled={saving}>
       {saving ? 'Saving…' : 'Save Changes'}
@@ -122,8 +122,10 @@ export const DongleDetailPage: React.FC = () => {
     if (!id) return;
     setSaving(true);
     setNotice(null);
+    // A phone manages its own APN: never send APN fields for it.
+    const payload = isPhoneTransport(dongle?.transport ?? '') ? { label: editForm.label } : editForm;
     try {
-      await api.dongles.update(id, editForm);
+      await api.dongles.update(id, payload);
       toggleEditing();
       setNotice({ kind: 'success', text: 'Configuration saved.' });
       loadData();
@@ -178,15 +180,14 @@ export const DongleDetailPage: React.FC = () => {
     );
   }
 
-  const signal = dongle.metrics?.signal_quality ?? null;
-  const percent = signal?.percent ?? null;
-
   return (
     <div className="main-content">
       <header className="page-header">
         <div>
           <h1>{dongle.label}</h1>
-          <p className="page-subtitle">{dongle.interface_name} · route table {dongle.route_table_id}</p>
+          <p className="page-subtitle">
+            <TransportBadge transport={dongle.transport} /> {dongle.interface_name} · route table {dongle.route_table_id}
+          </p>
         </div>
         <div className="detail-actions">
           <button className="btn" onClick={() => navigate('/')}>← Back</button>
@@ -206,15 +207,21 @@ export const DongleDetailPage: React.FC = () => {
       {dongle.state === 'ERROR' && <ErrorDetailPanel detail={dongle.last_error} />}
 
       {editing && (
-        <EditConfigForm form={editForm} saving={saving} onChange={setEditForm} onSubmit={handleUpdate} />
+        <EditConfigForm form={editForm} isPhone={isPhoneTransport(dongle.transport)} saving={saving} onChange={setEditForm} onSubmit={handleUpdate} />
       )}
 
       <div className="grid-layout">
         <div className="card">
           <h3 className="card-title">General Info</h3>
           <MetricRow label="State" value={<StateBadge state={dongle.state} />} />
-          <MetricRow label="IMEI" value={<span className="mono">{dongle.identity_imei || '—'}</span>} />
-          <MetricRow label="USB Serial" value={<span className="mono">{dongle.identity_usb_serial || '—'}</span>} />
+          {isPhoneTransport(dongle.transport) ? (
+            <MetricRow label="ADB Serial" value={<span className="mono">{dongle.identity_adb_serial || '—'}</span>} />
+          ) : (
+            <>
+              <MetricRow label="IMEI" value={<span className="mono">{dongle.identity_imei || '—'}</span>} />
+              <MetricRow label="USB Serial" value={<span className="mono">{dongle.identity_usb_serial || '—'}</span>} />
+            </>
+          )}
           <MetricRow label="Interface" value={<span className="mono">{dongle.interface_name}</span>} />
           <MetricRow label="Route Table" value={<span className="mono">{dongle.route_table_id}</span>} />
           <MetricRow
@@ -233,27 +240,7 @@ export const DongleDetailPage: React.FC = () => {
           )}
         </div>
 
-        <div className="card">
-          <h3 className="card-title">Metrics</h3>
-          <MetricRow label="Public IP" value={<span className="mono">{dongle.metrics?.public_ip || '—'}</span>} />
-          <div className="metric-row">
-            <span className="metric-label">Signal</span>
-            <div className="signal-container">
-              <div className="signal-bar-bg">
-                <div className="signal-bar-fill" style={{ width: `${percent ?? 0}%`, background: signalTone(percent) }} />
-              </div>
-              <span className="mono">{percent != null ? `${percent}%` : '—'}</span>
-            </div>
-          </div>
-          {signal?.rsrp != null && <MetricRow label="RSRP" value={<span className="mono">{signal.rsrp} dBm</span>} />}
-          {signal?.rsrq != null && <MetricRow label="RSRQ" value={<span className="mono">{signal.rsrq} dB</span>} />}
-          {signal?.sinr != null && <MetricRow label="SINR" value={<span className="mono">{signal.sinr} dB</span>} />}
-          <MetricRow label="Avg Ping" value={<span className="mono">{dongle.metrics?.ping?.avg_ms ?? '—'} ms</span>} />
-          <ProxyHealth
-            health={dongle.metrics?.proxy_health ?? null}
-            reason={dongle.metrics?.proxy_health_reason ?? null}
-          />
-        </div>
+        <DongleMetricsCard dongle={dongle} />
 
         <ProxyManagementCard dongleId={id} proxy={proxy} onChanged={loadData} actionsDisabled={editing} />
         {proxy && <ProxyAllowedHostsCard proxyId={proxy.id} containerName={proxy.container_name} />}

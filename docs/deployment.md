@@ -11,6 +11,8 @@ Broxy4G requires the following software to be installed on the host system:
 - nftables (for network isolation)
 - iproute2 (for routing management)
 - curl (for connectivity checks)
+- platform-tools (`adb` binary), **only if Android smartphones are used**
+  (transport `adb`) — see the ADB section below
 
 ## One-shot Install (recommended)
 
@@ -22,8 +24,9 @@ sudo deploy/install.sh
 ```
 
 The script is safe to re-run for upgrades. It performs all manual steps
-documented below: system user, directories, PolicyKit rule, systemd service,
-env file, Python venv, frontend build, and service start.
+documented below: system user, directories, PolicyKit rule, udev rules
+(Android USB access), systemd service, env file, Python venv, frontend
+build, and service start.
 
 > **Tip:** If `frontend/dist` is not yet built, either build it first
 > (`cd frontend && npm ci && npm run build`) or have Node.js installed so the
@@ -135,6 +138,92 @@ Procedure (one dongle at a time, always with 3 other uplinks alive):
 
 Rollback: delete the `.link` files and re-enumerate each dongle (names return
 to `wwan*`/`wwx*`); the application converges on its own.
+
+## ADB Setup (smartphone dongles)
+
+Optional — required only when enrolling Android smartphones (transport `adb`,
+cf. `docs/architecture.md` → *Device Transports*). The service drives the
+phone over ADB (USB tethering RNDIS, airplane-mode cycles) and through
+NetworkManager for the bearer IP.
+
+### The `adb` binary must be installed system-wide
+
+The unit runs with `ProtectHome=true`, so anything under `/home` is invisible
+to the service: a user-local or home-directory `adb` is unreachable. Install
+`adb` on the standard system `PATH` (e.g. `apt install adb`), or point the
+service at an explicit path with `BROXY4G_ADB_PATH` (see the environment
+variable list below; default `adb`).
+
+### ADB server, keys and phone authorization
+
+The ADB server runs **as the service user** (`User=broxy4g`), with
+`HOME=/var/lib/broxy4g`. The RSA key that the phone must authorize is
+therefore the **service user's** key, `~/.android/adbkey` =
+`/var/lib/broxy4g/.android/adbkey` (generated on first `adb` run). If a key
+is already authorized on the phone (e.g. your own `~/.android/adbkey` from a
+user-local `adb`), copy `adbkey` and `adbkey.pub` to
+`/var/lib/broxy4g/.android/` with the right ownership
+(`chown broxy4g:broxy4g`, private key `0600`) rather than accepting the
+prompt on the phone again. On the phone:
+
+1. enable **USB debugging** (developer options),
+2. plug the phone in and **accept the RSA authorization prompt** (the key
+   fingerprint shown must match `/var/lib/broxy4g/.android/adbkey`).
+
+A phone left `unauthorized` is **silently skipped** by discovery — it simply
+never appears in `GET /api/v1/dongles/discovered`. Verify as the service
+user: `sudo -u broxy4g adb devices -l` should list the phone in the
+`device` state.
+
+### USB access for the non-root service user
+
+The service runs as the unprivileged user `broxy4g`, so udev rules are
+required to grant access to the Android USB device. Install the provided
+rules file (vendor list, install steps and adaptation note are in its
+header):
+
+```bash
+sudo cp deploy/99-broxy4g-adb.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+The `broxy4g` group is the user's own group (the user is created with
+`--user-group` and the unit sets `Group=broxy4g`). Re-plug the phone after
+`udevadm trigger` for the new permissions to apply to an
+already-connected device.
+
+### NetworkManager and ModemManager
+
+The service must manage the tethering interface through NetworkManager
+(profile `broxy4g-phone-<serial>`, `ipv4.never-default yes` — see
+`docs/networking.md`), and `network-manager` must be running. Both daemons
+are already declared in the unit:
+`After=`/`Wants=ModemManager.service NetworkManager.service docker.service`.
+
+### Troubleshooting
+
+- **`adb devices -l` shows `unauthorized`** — the RSA prompt on the phone was
+  not accepted for the *service user's* key. Re-authorize; discovery skips
+  `unauthorized` devices silently, so nothing fails, the phone just never
+  appears.
+- **`adb devices -l` shows `offline`** — the ADB link is unstable (cable,
+  port); also silently skipped by discovery.
+- **`svc usb setFunctions rndis,adb` is rejected** — some vendors accept a
+  **single** function name only (rc=137 on comma-separated lists). The
+  documented command is `adb -s <serial> shell svc usb setFunctions rndis`;
+  the Android framework adds `adb` itself (`sys.usb.state` → `rndis,adb`).
+- **First tethering activation silently fails** — `svc usb setFunctions rndis`
+  can be ignored on the first attempt: the adapter verifies
+  `getprop sys.usb.state` and retries with a bounded backoff (3 attempts,
+  3 s apart). Switching the USB function restarts `adbd` for ~5 s, so a
+  `rc=255` returned by a follow-up ADB call is *not* a failure verdict.
+- **Airplane mode cannot be toggled from ADB** — some Android builds/vendor
+  policies restrict `cmd connectivity airplane-mode`; the reset's radio cycle
+  then degrades (a warning is logged and the reconnection is still attempted).
+  Each `cmd connectivity airplane-mode` step retries **once** on a transient
+  `rc=255` (see `_airplane_step` in `adapters/adb.py`).
+  Reset semantics are unchanged: `PENDING` while running, `DONE` only once the
+  public IP is verified, `ERROR` otherwise.
 
 ## systemd Setup
 
@@ -430,7 +519,10 @@ docker buildx build --platform linux/arm64 -t broxy4g:local .
 | BROXY4G_PROXY_HOST_IPS | Comma-separated host IPs to route through proxies | none |
 | BROXY4G_HOST | Host to bind to | 0.0.0.0 |
 | BROXY4G_PORT | Port to listen on | 8080 |
+| BROXY4G_ADB_PATH | Path of the `adb` binary used for smartphone dongles (transport `adb`). Must be reachable by the service (system-wide install — `ProtectHome=true` hides `/home`); an empty value falls back to the default | adb |
 | BROXY4G_USB_RECOVERY_COOLDOWN_SECONDS | Cross-cycle backoff (s) before soft USB re-enumeration of the same dongle is retried; in-memory only (a process restart allows one immediate attempt). Invalid or negative values fall back to the default | 300 |
+| BROXY4G_RESET_TIMEOUT_SECONDS | Bounded wall-clock timeout (s) of the whole reset operation (modem reset, reconnection, public-IP verification). The lock is released on timeout and the result is `ERROR`. Invalid or negative values fall back to the default | 300 |
+| BROXY4G_RESET_POST_DONE_SECONDS | Post-`DONE` grace window (s): a new reset of the same dongle inside the window returns `PENDING` (no hardware reset), so the operator is not disconnected right after obtaining their new public IP. In-memory only, distinct from the lock and the anti-storm throttle. Invalid or negative values fall back to the default | 15 |
 | BROXY4G_RESET_COOLDOWN_SECONDS | Minimum seconds between two executed resets of the same dongle (anti-storm guard); a request within the cooldown returns `PENDING`. Invalid or negative values fall back to the default | 60 |
 | BROXY4G_RESET_MAX_PER_WINDOW | Maximum resets per dongle per window (anti-storm guard); beyond the cap the reset is refused with `ERROR`. Invalid or negative values fall back to the default | 5 |
 | BROXY4G_RESET_WINDOW_SECONDS | Length in seconds of the sliding window used by the per-dongle reset cap. Invalid or negative values fall back to the default | 600 |

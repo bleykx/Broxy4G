@@ -2,6 +2,7 @@ import pytest
 
 from broxy4g.adapters.connectivity import FakeConnectivity
 from broxy4g.adapters.docker_compose import FakeDockerCompose
+from broxy4g.adapters.docker_network import FakeDockerNetwork
 from broxy4g.adapters.local_uplink import FakeLocalUplink
 from broxy4g.adapters.modem_manager import FakeModemManager
 from broxy4g.adapters.net_interface import FakeInterface
@@ -61,6 +62,11 @@ def settings_repo(session_factory):
 @pytest.fixture
 def fake_docker_compose():
     return FakeDockerCompose()
+
+
+@pytest.fixture
+def fake_docker_network():
+    return FakeDockerNetwork()
 
 
 @pytest.fixture
@@ -227,8 +233,13 @@ def enrollment_service(dongle_repo, connection_service, proxy_service, settings_
 
 @pytest.fixture
 def reset_service(
-    dongle_repo, proxy_repo, connection_service, proxy_service, fake_reset_lock, metrics_snapshot
+    dongle_repo, proxy_repo, connection_service, proxy_service, fake_reset_lock,
+    metrics_snapshot, fake_connectivity,
 ):
+    # L'IP publique doit être posée : depuis le gate de propagation, un reset
+    # n'est DONE que si la sonde d'IP publique est OK. ``ip_wait_delay=0.0``
+    # évite de brûler du temps réel dans la boucle d'attente.
+    fake_connectivity.set_public_ip("10.64.0.1")
     return ResetService(
         dongle_repo,
         proxy_repo,
@@ -236,6 +247,8 @@ def reset_service(
         proxy_service,
         fake_reset_lock,
         metrics_snapshot=metrics_snapshot,
+        ip_wait_attempts=2,
+        ip_wait_delay=0.0,
     )
 
 

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from .proxy_config import INTERNAL_PROXY_PORT
-from .proxy_network import DOCKER_NETWORK_NAME, DOCKER_SUBNET
+from .proxy_network import DOCKER_NETWORK_NAME
 
 
 @dataclass(frozen=True)
@@ -16,7 +16,6 @@ class ComposeSpec:
     image: str = "3proxy/3proxy:latest"
     container_port: int = INTERNAL_PROXY_PORT
     network_name: str = DOCKER_NETWORK_NAME
-    subnet: str = DOCKER_SUBNET
     bind_ip: str | None = "0.0.0.0"  # IP d'écoute publiée ; None = conteneur non publié
 
 
@@ -26,10 +25,11 @@ def render_docker_compose(spec: ComposeSpec) -> str:
     Le bloc ``ports:`` n'est émis que si ``bind_ip`` est défini ; sinon le
     conteneur reste présent (service) mais n'est publié sur aucune interface.
 
-    Le réseau pose ``com.docker.network.bridge.enable_ip_masquerade: "false"`` :
-    le masquerade POSTROUTING propre à Docker sur le sous-réseau proxy est
-    désactivé, pour que la chaîne nftables ``proxy_nat`` (masquerade conditionné
-    à l'interface du dongle lié) reste le seul SNAT légitime.
+    Le pont partagé ``broxy4g-net`` est déclaré ``external: true`` : il est
+    créé et configuré par l'application (sous-réseau, passerelle, masquerade
+    Docker désactivé via ``docker network create``). Compose ignore
+    silencieusement ``driver``/``ipam`` sur un réseau externe et avertirait
+    s'il le possédait, donc le rendu ne porte que ``external`` + ``name``.
     """
     lines = [
         f"name: {spec.project_name}",
@@ -52,12 +52,7 @@ def render_docker_compose(spec: ComposeSpec) -> str:
         f"        ipv4_address: {spec.network_ip}",
         "networks:",
         f"  {spec.network_name}:",
+        "    external: true",
         f"    name: {spec.network_name}",
-        "    driver: bridge",
-        "    driver_opts:",
-        '      com.docker.network.bridge.enable_ip_masquerade: "false"',
-        "    ipam:",
-        "      config:",
-        f"        - subnet: {spec.subnet}",
     ]
     return "\n".join(lines) + "\n"

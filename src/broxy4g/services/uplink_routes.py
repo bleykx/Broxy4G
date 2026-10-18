@@ -1,26 +1,32 @@
 """(Re)pose idempotente des routes d'uplink d'un dongle à partir de son bearer.
 
-Seule implémentation des artefacts de routage d'uplink (règle fwmark,
-route par défaut de la table dédiée, règle source « from <IP bearer> »)
-et du plancher : réutilisée par ``ConnectionService.connect`` et par la
-reconciliation, qui détecte ainsi une route écrasée sur un dongle déjà
-actif (ONLINE) sans reconnexion du modem. Aucun changement d'état du
-dongle ici.
+Résout le bearer (modem par identité, ou téléphone ADB via RNDIS) et décide de
+la politique de route (route réelle vs plancher), puis délègue l'écriture des
+artefacts ip/fwmark à ``UplinkRouteWriter``. Réutilisée par
+``ConnectionService.connect`` et par la reconciliation, qui détecte ainsi une
+route écrasée sur un dongle déjà actif (ONLINE) sans reconnexion du modem.
+Aucun changement d'état du dongle ici.
 
 Une table de routage dédiée ne doit JAMAIS rester sans route ``default`` :
-sinon le noyau retombe sur la table ``main`` (route par défaut de l'hôte)
-et le proxy du dongle fuit par eth. Quand aucune route réelle ne peut être
-posée (interface inconnue, bearer sans IPv4, état non actif), le plancher
-(route ``default unreachable``) est posé à la place.
+sinon le noyau retombe sur la table ``main`` (route par défaut de l'hôte) et
+le proxy du dongle fuit par eth. Quand aucune route réelle ne peut être posée
+(interface inconnue, bearer sans IPv4, état non actif), le plancher (route
+``default unreachable``) est posé à la place.
 """
 
 import logging
+from typing import TYPE_CHECKING
 
 from broxy4g.adapters.modem_manager import BearerIpConfig, ModemInfo, ModemManagerAdapter
-from broxy4g.adapters.routing import RoutingAdapter, RoutingRule
+from broxy4g.adapters.routing import RoutingAdapter
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.identity import IdentityMaterial
+from broxy4g.domain.transport import Transport
 from broxy4g.services.network_isolation import ACTIVE_INTERFACE_STATES
+from broxy4g.services.uplink_route_writer import UplinkRouteWriter
+
+if TYPE_CHECKING:
+    from broxy4g.services.smartphone_uplink import SmartphoneUplinkService
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +34,16 @@ logger = logging.getLogger(__name__)
 class UplinkRouteService:
     """Pose et répare les routes d'uplink d'un dongle, sans jamais reconnecter le modem."""
 
-    def __init__(self, modem: ModemManagerAdapter, routing: RoutingAdapter):
+    def __init__(
+        self,
+        modem: ModemManagerAdapter,
+        routing: RoutingAdapter,
+        smartphone: "SmartphoneUplinkService | None" = None,
+    ):
         self.modem = modem
         self.routing = routing
+        self.smartphone = smartphone
+        self._writer = UplinkRouteWriter(routing)
 
     async def resolve_modem(self, dongle: Dongle) -> ModemInfo | None:
         """Résout le modem par identité matérielle (tolère un changement de port USB)."""
@@ -53,6 +66,8 @@ class UplinkRouteService:
         modem introuvable) posent un plancher NON forcé : ils ne dégradent
         jamais une route ``default`` déjà présente.
         """
+        if dongle.transport is Transport.ADB:
+            return await self._apply_adb(dongle)
         if dongle.state not in ACTIVE_INTERFACE_STATES:
             await self.apply_barrier(dongle, force=True)
             return
@@ -74,121 +89,48 @@ class UplinkRouteService:
         bearer = await self.modem.get_bearer_ip(modem.path)
         await self.apply_bearer(dongle, bearer, dongle.interface_name)
 
+    async def _apply_adb(self, dongle: Dongle) -> None:
+        """Chemin téléphone ADB : bearer du partage USB (RNDIS), jamais de modem.
+
+        Même règle qu'en modem : état non actif → plancher FORCÉ ; interface du
+        téléphone introuvable → plancher NON forcé (une route réelle pré-existante
+        n'est jamais dégradée). Bearer ``None`` (pas de bail DHCP) : ``apply_bearer``
+        force le plancher, son adresse étant la source de la route.
+        """
+        if dongle.state not in ACTIVE_INTERFACE_STATES:
+            await self.apply_barrier(dongle, force=True)
+            return
+        if self.smartphone is None:
+            logger.warning(
+                "Dongle %s : service smartphone non configuré, plancher non forcé", dongle.id
+            )
+            await self.apply_barrier(dongle)
+            return
+        serial = dongle.identity.adb_serial or dongle.identity.primary_key
+        interface = self.smartphone.resolve_interface(serial) or dongle.interface_name
+        if not interface:
+            logger.warning(
+                "Dongle %s : interface du téléphone introuvable, plancher non forcé", dongle.id
+            )
+            await self.apply_barrier(dongle)
+            return
+        bearer = await self.smartphone.current_bearer(serial)
+        await self.apply_bearer(dongle, bearer, interface)
+
     async def apply_bearer(
         self, dongle: Dongle, bearer: BearerIpConfig | None, interface_name: str | None
     ) -> None:
         """(Re)pose règle fwmark + route par défaut + règle source, de façon idempotente.
 
-        N'écrit que ce qui est absent ou faux ; un appel sur un état déjà
-        correct ne produit aucune écriture. Quand aucune route réelle ne
-        peut être posée (interface inconnue, bearer absent ou sans IPv4),
-        FORCE le plancher : une table dédiée ne doit jamais rester sans
-        route ``default``, et un bearer perdu ne doit pas conserver
-        l'ancienne route réelle.
+        Délégation à ``UplinkRouteWriter`` (voir sa docstring) : l'appelant
+        fournit le bearer et l'interface déjà résolus.
         """
-        if not (dongle.route_table_id and dongle.fwmark):
-            return
-        table_id = dongle.route_table_id
-        rules = await self.routing.list_rules()
-        await self._ensure_fwmark_rule(dongle, table_id, rules)
-        if not interface_name or bearer is None or not bearer.address:
-            # Aucune IPv4 à épingler (interface inconnue, session PPP sans
-            # port net, ...) : plancher forcé, l'ancienne route réelle
-            # n'a plus de source valide.
-            await self.apply_barrier(dongle, force=True)
-            return
-        await self._apply_default_route(dongle, table_id, bearer, interface_name)
-        await self._apply_source_rule(dongle, table_id, rules, bearer)
+        await self._writer.apply_bearer(dongle, bearer, interface_name)
 
     async def apply_barrier(self, dongle: Dongle, *, force: bool = False) -> None:
-        """Assure qu'une route ``default`` existe dans la table dédiée (plancher).
+        """Assure une route ``default`` dans la table dédiée (plancher).
 
-        S'assurer qu'une route ``default`` existe : si elle est déjà là
-        (route RÉELLE ou plancher), rien n'est écrit — une route existante
-        n'est jamais dégradée. ``force=True`` remplace en revanche la route
-        ``default`` existante par le plancher (``default unreachable``),
-        pour un dongle qui vient de perdre son bearer/état actif.
-        No-op si aucun slot de routage (table/fwmark) alloué.
+        Délégation à ``UplinkRouteWriter`` (voir sa docstring) : rien n'est
+        écrit si une route ``default`` est déjà présente, sauf ``force=True``.
         """
-        if not (dongle.route_table_id and dongle.fwmark):
-            return
-        table_id = dongle.route_table_id
-        rules = await self.routing.list_rules()
-        await self._ensure_fwmark_rule(dongle, table_id, rules)
-        routes = await self.routing.list_routes(table_id)
-        if not force and any(r.dest == "default" for r in routes):
-            return
-        logger.info(
-            "Dongle %s : route par défaut %s de la table %d, plancher posé (unreachable)",
-            dongle.id,
-            "absente" if not force else "existante remplacée (forcé)",
-            table_id,
-        )
-        await self.routing.add_barrier_route(table_id)
-
-    async def _ensure_fwmark_rule(
-        self, dongle: Dongle, table_id: int, rules: list[RoutingRule]
-    ) -> None:
-        """(Re)pose la règle fwmark si elle est absente des règles listées."""
-        if any(r.table_id == table_id and r.fwmark == dongle.fwmark for r in rules):
-            return
-        logger.info(
-            "Dongle %s : règle fwmark %s (table %d) absente, re-posée",
-            dongle.id, dongle.fwmark, table_id,
-        )
-        await self.routing.add_rule(table_id, dongle.fwmark)
-
-    async def _apply_default_route(
-        self, dongle: Dongle, table_id: int, bearer: BearerIpConfig, interface_name: str
-    ) -> None:
-        """Route par défaut de la table dédiée ; sans passerelle, fallback scope link.
-
-        L'idempotence compare la route RÉELLE (type ``"unicast"``) : un
-        plancher présent dans la table est remplacé par la route réelle.
-        """
-        desired_via = bearer.gateway or None
-        routes = await self.routing.list_routes(table_id)
-        existing = next((r for r in routes if r.dest == "default" and r.type == "unicast"), None)
-        if existing is not None and existing.dev == interface_name and existing.via == desired_via:
-            return
-        if desired_via is None:
-            logger.warning(
-                "Dongle %s : bearer sans passerelle — route posée sans via "
-                "('default dev %s', scope link) dans la table %d ; le trafic sort "
-                "probablement mal tant qu'aucun via n'est disponible",
-                dongle.id, interface_name, table_id,
-            )
-        elif existing is not None:
-            logger.info(
-                "Dongle %s : route par défaut de la table %d réparée (dev=%s via=%s -> dev=%s via=%s)",
-                dongle.id, table_id, existing.dev, existing.via, interface_name, desired_via,
-            )
-        elif any(r.dest == "default" and r.type != "unicast" for r in routes):
-            logger.info(
-                "Dongle %s : plancher de la table %d remplacé par la route réelle (dev=%s via=%s)",
-                dongle.id, table_id, interface_name, desired_via,
-            )
-        else:
-            logger.info(
-                "Dongle %s : route par défaut absente de la table %d, posée (dev=%s via=%s)",
-                dongle.id, table_id, interface_name, desired_via,
-            )
-        await self.routing.add_route(table_id, "default", desired_via, interface_name)
-
-    async def _apply_source_rule(
-        self, dongle: Dongle, table_id: int, rules: list[RoutingRule], bearer: BearerIpConfig
-    ) -> None:
-        """Règle « from <IP bearer> » : le trafic du dongle sort par son uplink."""
-        if not bearer.address:
-            return
-        existing = next(
-            (r for r in rules if r.table_id == table_id and r.source is not None), None
-        )
-        if existing is not None and existing.source == bearer.address:
-            return
-        logger.info(
-            "Dongle %s : règle source table %d réparée (%s -> %s)",
-            dongle.id, table_id,
-            existing.source if existing is not None else None, bearer.address,
-        )
-        await self.routing.add_source_rule(bearer.address, table_id)
+        await self._writer.apply_barrier(dongle, force=force)

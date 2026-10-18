@@ -100,3 +100,56 @@ async def test_service_never_touches_other_interfaces():
     written_devices = {dev for dev, _, _ in iface.assignments}
     assert written_devices == {BRIDGE}
     assert await iface.get_ip(OTHER_IFACE) == "192.168.1.10"
+
+
+async def test_ensure_ready_creates_absent_network_once():
+    """Réseau absent (reboot) : création unique ; le 2e appel est idempotent."""
+    iface = RecordingInterface()
+    service, _, network = make_service(make_network(with_bridge=False), iface)
+
+    first = await service.ensure_ready()
+    second = await service.ensure_ready()
+
+    assert first is True
+    assert network.created == ["broxy4g-net"]
+    # Le 2e appel voit le réseau présent : aucune seconde création.
+    assert second in (True, False)
+    assert len(iface.assignments) <= 1
+
+
+async def test_ensure_ready_absent_network_uses_subnet_and_gateway():
+    """La création porte le sous-réseau et la passerelle du domaine."""
+    iface = RecordingInterface()
+    service, _, network = make_service(make_network(with_bridge=False), iface)
+
+    await service.ensure_ready()
+
+    info = await network.inspect("broxy4g-net")
+    assert info is not None
+    assert info.subnet == "172.28.0.0/16"
+    assert info.gateway == "172.28.0.1"
+
+
+async def test_ensure_ready_present_network_no_creation():
+    """Réseau présent et passerelle en place : aucune création, aucune écriture."""
+    iface = RecordingInterface()
+    iface.set_address(BRIDGE, "172.28.0.1")
+    service, _, network = make_service(make_network(), iface)
+
+    result = await service.ensure_ready()
+
+    assert result is False
+    assert network.created == []
+    assert iface.assignments == []
+
+
+async def test_ensure_ready_repairs_lost_gateway_keeps_existing_network():
+    """Passerelle perdue : réparation SANS suppression/recréation du pont."""
+    iface = RecordingInterface()
+    service, _, network = make_service(make_network(), iface)
+
+    repaired = await service.ensure_ready()
+
+    assert repaired is True
+    assert network.created == []  # l'existant est conservé
+    assert iface.assignments == [(BRIDGE, "172.28.0.1", 16)]

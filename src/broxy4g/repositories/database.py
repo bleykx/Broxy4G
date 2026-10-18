@@ -34,6 +34,7 @@ class DongleORM(Base):
     identity_imei: str | None = Column(String)
     identity_usb_serial: str | None = Column(String)
     identity_iccid: str | None = Column(String)
+    identity_adb_serial: str | None = Column(String)
     identity_key: str = Column(String, unique=True, index=True)
     label: str = Column(String)
     state: str = Column(String)
@@ -44,6 +45,7 @@ class DongleORM(Base):
     interface_name: str | None = Column(String)
     proxy_id: UUID | None = Column(UUIDType)
     last_error: str | None = Column(String)
+    transport: str = Column(String, nullable=False, default="modem", server_default="modem")
     created_at: datetime = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: datetime = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
@@ -152,6 +154,9 @@ def _add_missing_columns(engine) -> None:
     if not insp.has_table("dongles"):
         return
     _ensure_column(engine, "dongles", "last_error", "VARCHAR")
+    _ensure_column(engine, "dongles", "transport", "VARCHAR NOT NULL DEFAULT 'modem'")
+    # Nullable, jamais de défaut : une ligne ancienne reste simplement sans serial ADB.
+    _ensure_column(engine, "dongles", "identity_adb_serial", "VARCHAR")
     if insp.has_table("proxies"):
         for name, column_type in _PROXY_MIGRATED_COLUMNS:
             _ensure_column(engine, "proxies", name, column_type)

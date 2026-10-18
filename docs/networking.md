@@ -188,6 +188,70 @@ par l'uplink de l'hôte. La `ip rule fwmark` et le slot (`route_table_id`/
 `fwmark`) sont **conservés** : la table reste épinglée au dongle, et la
 reconciliation repose la route réelle dès que le bearer est de retour.
 
+## Smartphone Uplink (tethering USB / RNDIS)
+
+Un téléphone Android enrôlé en transport `adb` est un uplink comme un autre,
+mais le bearer provient du **partage de connexion USB** (RNDIS) du téléphone,
+pas d'un modem ModemManager. Le chemin est documenté ici car il réutilise
+**exactement** les mêmes artefacts de table dédiée qu'un modem.
+
+### Résolution de l'interface RNDIS (jamais de nom codé en dur)
+
+La netdev RNDIS est nommée `enx<mac>` et ce nom **n'est pas stable**. Elle est
+résolue par **sysfs** : le téléphone est identifié par son serial
+(`/sys/bus/usb/devices/<id>/serial` == le serial ADB, `getprop ro.serialno`)
+et la netdev est le device sous
+`/sys/bus/usb/devices/<id>/…/net/` (`adapters/usb_sysfs_net.py`,
+`find_net_interfaces_for_usb_serial`). L'interface est **ré-épinglee à chaque
+cycle de reconciliation** (`workers/adb_soft_recovery.py`) : si le noyau a
+renommé la netdev, le dongle est mis à jour sans reconnexion.
+
+### Profil NetworkManager sans route par défaut
+
+L'adresse du bearer est fournie par **NetworkManager** (`nmcli`, profil
+`broxy4g-phone-<serial>`), pas par ModemManager :
+
+- `ipv4.never-default yes` — le profil obtient une adresse IPv4 **sans
+  jamais créer de seconde route par défaut globale** ;
+- `ipv6.method disabled` ;
+- `ipv4.route-metric 21000` — métrique élevée, la route du profil n'est
+  jamais privilégiée.
+
+Le **bail DHCP** (adresse + préfixe, lus sur l'interface, passerelle lue dans
+`nmcli -f DHCP4 con show`) est converti en configuration du bearer
+(`BearerIpConfig`, méthode `dhcp`) — exactement la même structure que celle
+qu'expose ModemManager pour un modem.
+
+### Même table dédiée, mêmes artefacts
+
+À partir du bearer ainsi résolu, les **mêmes** quatre artefacts de la table
+dédiée sont posés de façon idempotente (`services/uplink_route_writer.py`) :
+règle `fwmark` → table dédiée, route par défaut de la table
+(`default via <gw> dev <iface>`), règle source **`from <IP du bail DHCP>`**
+et plancher anti-fuite `default unreachable`. L'IP du bail DHCP (l'adresse
+portée par la netdev RNDIS) est la source de la règle
+`ip rule from <IP> lookup <table>` : le trafic du proxy (marqué par `fwmark`)
+sort **par le téléphone**.
+
+**Pourquoi la règle source compte ici** : les sondes de connectivité (ping,
+IP publique, dont le gate de `DONE` du reset) sont épinglées à l'IP **source
+du bearer** (`curl --interface <IP>`, `ping -I <IP>` —
+`services/uplink_probe.py`). Pour qu'elles mesurent l'uplink du téléphone, ce
+trafic doit suivre la table dédiée et sortir par la netdev RNDIS : sans la
+règle `from <IP du bail>`, ces sondes suivraient la table `main` et mesureraient
+l'uplink de l'hôte.
+
+### Garde-fou : jamais de route par défaut de l'hôte via le téléphone
+
+**Règle absolue (rappel)** : la table `main` et la route par défaut de l'hôte
+ne sont **JAMAIS** modifiées. Un téléphone en partage USB peut, selon la
+configuration Android, installer une route par défaut dans la table `main`
+pointant vers sa propre netdev. C'est interdit ici : le filet de sécurité
+`guard_default_route` (`services/smartphone_uplink.py`) liste les routes par
+défaut de la table `main`, et si l'une d'elles passe par l'interface du
+téléphone, elle est **journalisée (ACTION ADMIN) et supprimée** — à chaque
+mise en ligne du profil.
+
 ## nftables Isolation
 
 Implémenté par `adapters/nftables_real.py` (`RealNftables`), piloté par
@@ -286,6 +350,17 @@ d'un proxy (`services/proxy_lifecycle.py`), après connexion/déconnexion d'un
 dongle (`services/connection.py`) et à la fin de chaque cycle de reconciliation
 (`workers/reconciliation.py`).
 
+Le reprovisionnement (donc la reconciliation) répare aussi automatiquement un
+proxy dont `password_hash` est NULL — une ligne antérieure à la migration de la
+colonne : le hash MD5-crypt n'étant pas récupérable, de nouveaux identifiants
+sont générés et persistés. L'événement est journalisé en warning ; les clients
+du proxy doivent être reconfigurés avec les nouveaux identifiants (le mot de
+passe n'est jamais re-renvoyé par l'API). La réparation se faisant hors API,
+ces identifiants ne sont affichés à personne : un opérateur qui en a besoin
+déclenche ensuite une rotation explicite
+(`POST /api/v1/proxies/{proxy_id}/rotate`), qui renvoie le nouveau couple une
+seule fois.
+
 ## Local Interface Uplinks
 
 Une interface réseau de l'hôte (ethernet / wifi) peut aussi être exposée comme
@@ -344,16 +419,28 @@ it never changes the egress pinning.
 
 ## Auto-réparation du bridge proxy et sonde de santé
 
-### Auto-réparation du bridge du réseau proxy
+### Création et auto-réparation du bridge du réseau proxy
 
-Le réseau Docker `broxy4g-net` est créé **implicitement** au premier
-`docker compose up`. À chaque cycle de réconciliation, une étape
-(`ProxyNetworkService.ensure_gateway`, `services/proxy_network.py`) garantit
-que le device bridge du réseau porte bien son IP passerelle
-(`172.28.0.1` + préfixe `16`), de façon **idempotente** : adresse déjà
-présente → aucune écriture ; réseau absent → premier démarrage → no-op
-silencieux. Ne jamais `flush` ni supprimer d'adresse sur ce bridge : il
-porte potentiellement des conteneurs actifs.
+Le réseau Docker partagé `broxy4g-net` est créé et géré **par
+l'application** (`ProxyNetworkService.ensure_ready`,
+`services/proxy_network.py` ; `DockerNetworkAdapter.create_network`,
+`adapters/docker_network.py`) : les fichiers compose le déclarent
+`external: true`. `ensure_ready` est appelée avant tout `docker compose up`
+(provisionnement d'un proxy) et à chaque cycle de réconciliation, sous un
+verrou single-flight, de façon **idempotente** :
+
+- réseau **absent** (premier démarrage, suppression accidentelle, reboot) →
+  `docker network create` avec sous-réseau `172.28.0.0/16`, passerelle
+  `172.28.0.1`, masquerade Docker désactivé ; « already exists » = succès
+  silencieux, toute autre erreur est remontée. L'action d'administration est
+  journalisée ;
+- réseau **présent** → se réduit à `ensure_gateway` : le device bridge du
+  réseau porte bien son IP passerelle (`172.28.0.1` + préfixe `16`) ;
+  adresse déjà présente → aucune écriture.
+
+Un pont existant n'est **jamais** supprimé, modifié ni recréé par
+l'application : il porte potentiellement des conteneurs actifs. Ne jamais
+`flush` ni supprimer d'adresse sur ce bridge.
 
 Mode de panne évité : sans cette IP, la table `main` perd sa route connectée
 vers `172.28.0.0/16` et les paquets DNATés vers les proxys
@@ -380,20 +467,25 @@ l'hôte — c'est un choix assumé, à ne pas « corriger » par la sonde.
 
 ## Masquerade Docker désactivé
 
-Le réseau `broxy4g-net` est rendu par le compose de chaque proxy
-(`domain/proxy_compose.py`) avec l'option
-`com.docker.network.bridge.enable_ip_masquerade: "false"` :
+Le réseau `broxy4g-net` étant créé par l'application (voir ci-dessus),
+l'option `com.docker.network.bridge.enable_ip_masquerade: "false"` est
+appliquée à la **création** (`DockerNetworkAdapter.create_network`) :
+
+```
+docker network create --driver bridge \
+  --subnet 172.28.0.0/16 --gateway 172.28.0.1 \
+  --opt com.docker.network.bridge.enable_ip_masquerade=false broxy4g-net
+```
+
+Les fichiers compose de chaque proxy ne déclarent le réseau que comme
+externe (`domain/proxy_compose.py`) — Compose ignorerait silencieusement
+`driver`/`ipam` sur un réseau externe :
 
 ```yaml
 networks:
   broxy4g-net:
+    external: true
     name: broxy4g-net
-    driver: bridge
-    driver_opts:
-      com.docker.network.bridge.enable_ip_masquerade: "false"
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16
 ```
 
 **Pourquoi** : sans cette option, Docker installe son propre masquerade
@@ -404,13 +496,14 @@ proxy et le rend effectivement routable sur l'uplink de l'hôte. Notre chaîne
 SNAT légitime.
 
 **Mise à jour d'une installation existante** : Docker n'applique cette option
-qu'à la **création** du réseau ; modifier le compose ne change pas un réseau
-déjà existant. Procédure :
+qu'à la **création** du réseau, et l'application ne modifie jamais un réseau
+existant. Si un réseau créé par une ancienne version (compose ou application)
+n'a pas l'option :
 
 1. Arrêter les proxies (arrêter/stopper les conteneurs) ;
 2. `docker network rm broxy4g-net` ;
-3. Relancer / réconcilier — le réseau est recréé par le compose, avec l'option
-   appliquée ;
+3. Relancer / réconcilier — `ProxyNetworkService.ensure_ready` recrée le
+   réseau, avec l'option appliquée ;
 4. Vérifier :
    `docker network inspect broxy4g-net --format '{{index .Options "com.docker.network.bridge.enable_ip_masquerade"}}'`
    (attendu : `false`), puis la passerelle `172.28.0.1/16` sur le bridge

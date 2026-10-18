@@ -18,6 +18,14 @@ class FakeProxyRepo:
         return set(self.ports)
 
 
+class FakeReservations:
+    def __init__(self, ports: set[int] | None = None):
+        self.ports = ports or set()
+
+    async def reserved_ports(self) -> set[int]:
+        return set(self.ports)
+
+
 def test_port_range_constants():
     assert PORT_RANGE_START == 31201
     assert PORT_RANGE_END == 31299
@@ -70,6 +78,40 @@ async def test_port_allocator_exhausted_with_fake_repo():
     fake.ports = set(range(PORT_RANGE_START, PORT_RANGE_END + 1))
     with pytest.raises(PortRangeExhausted):
         await PortAllocator(fake).allocate()
+
+
+@pytest.mark.asyncio
+async def test_port_allocator_skips_ports_reserved_by_docker():
+    """Base vide mais 31201-31205 réservés par Docker (conteneurs étrangers)
+    → le premier port libre 31206 est choisi."""
+    fake = FakeProxyRepo()
+    reservations = FakeReservations({31201, 31202, 31203, 31204, 31205})
+
+    port = await PortAllocator(fake, reservations=reservations).allocate()
+
+    assert port == 31206
+
+
+@pytest.mark.asyncio
+async def test_port_allocator_exhausted_when_docker_reserves_whole_range():
+    """Plage entièrement réservée par Docker (et vide en base) → PortRangeExhausted."""
+    fake = FakeProxyRepo()
+    reservations = FakeReservations(set(range(PORT_RANGE_START, PORT_RANGE_END + 1)))
+
+    with pytest.raises(PortRangeExhausted):
+        await PortAllocator(fake, reservations=reservations).allocate()
+
+
+@pytest.mark.asyncio
+async def test_port_allocator_union_db_and_docker_reservations():
+    """Les réservations Docker et la base sont unies : le trou commun est sauté."""
+    fake = FakeProxyRepo()
+    fake.ports = {31201, 31203}
+    reservations = FakeReservations({31202})
+
+    port = await PortAllocator(fake, reservations=reservations).allocate()
+
+    assert port == 31204
 
 
 @pytest.mark.asyncio

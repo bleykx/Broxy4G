@@ -1,9 +1,11 @@
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import text
 
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.identity import IdentityMaterial
+from broxy4g.domain.transport import Transport
 
 
 @pytest.mark.asyncio
@@ -102,6 +104,64 @@ async def test_dongle_repository_last_error_roundtrip(dongle_repo, session_facto
     retrieved = await dongle_repo.get_by_id(dongle.id)
     assert retrieved is not None
     assert retrieved.last_error == "X: y"
+
+
+@pytest.mark.asyncio
+async def test_dongle_repository_transport_roundtrip(dongle_repo, session_factory):
+    # Un transport ADB doit survivre à un aller-retour save/get_by_id
+    identity = IdentityMaterial(adb_serial="R58N12AB")
+    dongle = Dongle(identity=identity, label="Téléphone", transport=Transport.ADB)
+    saved = await dongle_repo.save(dongle)
+
+    retrieved = await dongle_repo.get_by_id(saved.id)
+    assert retrieved is not None
+    assert retrieved.transport is Transport.ADB
+
+
+@pytest.mark.asyncio
+async def test_dongle_repository_legacy_row_defaults_to_modem():
+    # Une base ancienne sans la colonne transport : après migration, une ligne
+    # insérée sans valeur doit revenir en MODEM.
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from broxy4g.repositories import DongleRepository
+    from broxy4g.repositories.database import init_db
+
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE dongles (
+                    id VARCHAR PRIMARY KEY,
+                    identity_imei VARCHAR, identity_usb_serial VARCHAR,
+                    identity_iccid VARCHAR,
+                    identity_key VARCHAR UNIQUE,
+                    label VARCHAR, state VARCHAR,
+                    apn VARCHAR, apn_auth VARCHAR,
+                    route_table_id INTEGER, fwmark INTEGER,
+                    interface_name VARCHAR, proxy_id VARCHAR, last_error VARCHAR,
+                    created_at DATETIME, updated_at DATETIME
+                )
+                """
+            )
+        )
+    init_db(engine)  # la migration idempotente ajoute la colonne transport
+    dongle_id = uuid4()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO dongles (id, identity_key, label, state) "
+                "VALUES (:id, '123', 'Ancien dongle', 'ONLINE')"
+            ),
+            {"id": str(dongle_id)},
+        )
+
+    repo = DongleRepository(sessionmaker(bind=engine))
+    retrieved = await repo.get_by_id(dongle_id)
+    assert retrieved is not None
+    assert retrieved.transport is Transport.MODEM
 
 
 @pytest.mark.asyncio

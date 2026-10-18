@@ -29,3 +29,21 @@ def network_ip_for_port(port: int) -> str:
             f"Port {port} hors plage proxy [{PROXY_PORT_START}, {PROXY_PORT_END}]"
         )
     return f"172.28.0.{_FIRST_HOST_OCTET + (port - PROXY_PORT_START)}"
+
+
+def port_for_ip(ip: str) -> int | None:
+    """Port publié dérivé d'une IP interne du réseau proxy (inverse de
+    ``network_ip_for_port``).
+
+    ``None`` si l'IP ne suit pas le schéma ``172.28.0.x`` ou si le port
+    correspondant est hors de la plage allouable (ex. passerelle, conteneur
+    étranger). Le préfixe éventuel (``/16``) est ignoré.
+    """
+    base = ip.partition("/")[0]
+    parts = base.split(".")
+    if len(parts) != 4 or parts[:3] != ["172", "28", "0"] or not parts[3].isdigit():
+        return None
+    port = PROXY_PORT_START + (int(parts[3]) - _FIRST_HOST_OCTET)
+    if not (PROXY_PORT_START <= port <= PROXY_PORT_END):
+        return None
+    return port

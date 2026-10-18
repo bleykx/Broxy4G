@@ -203,6 +203,11 @@ body {
   transition: width 0.3s ease;
 }
 
+.signal-na {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
 /* Grid/Cards */
 .grid-layout {
   display: grid;
@@ -305,6 +310,19 @@ body {
 
 .metric-label {
   color: var(--text-muted);
+}
+
+/* Compact "Rotate IP" action under the Public IP row (dashboard cards) */
+.rotate-ip-row {
+  display: flex;
+  margin: -0.25rem 0;
+}
+
+.btn-sm {
+  padding: 0.25rem 0.625rem;
+  font-size: 0.75rem;
+  border-radius: 6px;
+  gap: 0.375rem;
 }
 
 /* Reset endpoint copy row (dongle detail) */
@@ -802,6 +820,11 @@ body {
   color: var(--state-error);
   font-size: 0.85rem;
   margin-bottom: 0.75rem;
+}
+
+.card-notice {
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
 }
 
 .proxy-actions {
