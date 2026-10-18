@@ -27,8 +27,9 @@ log "Python $(python3 --version | awk '{print $2}') OK"
 # 4. System packages
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
+# libglib2.0-bin: gdbus, used for NetworkManager profile writes (raw D-Bus)
 apt-get install -y --no-install-recommends \
-    modemmanager network-manager nftables iproute2 curl \
+    modemmanager network-manager libglib2.0-bin nftables iproute2 curl \
     python3-venv python3-pip ca-certificates
 
 # 5. System user

@@ -26,7 +26,8 @@ services:
       - /var/lib/broxy4g:/var/lib/broxy4g
       # Host Docker daemon: 3proxy container lifecycle
       - /var/run/docker.sock:/var/run/docker.sock
-      # Host system D-Bus: mmcli talks to the host's ModemManager
+      # Host system D-Bus: mmcli talks to the host's ModemManager, nmcli
+      # (smartphone ADB transport) to the host's NetworkManager
       - /run/dbus:/run/dbus
       # `privileged: true` is NOT enough: Docker builds the container's /dev
       # snapshot at container creation, so a USB device enumerated later

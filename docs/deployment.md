@@ -314,6 +314,21 @@ Docker deployment has its own specifics:
    host shows the phone, compare `ls /dev/bus/usb/001/` on the host and inside
    the container — the container must list the same device number; if it does
    not, the mount is missing (recreate the container: `docker compose up -d`).
+6. The image also ships `nmcli` (Debian `network-manager` package): the
+   smartphone transport drives the RNDIS profile through NetworkManager, and
+   the container talks to the **host's** NetworkManager daemon over the
+   mounted `/run/dbus` (no NM daemon runs inside the container). Diagnostic:
+   if enrolling a phone fails with the error "profil NetworkManager …
+   incorrect", first check
+   `docker compose exec broxy4g command -v nmcli`.
+7. The `nmcli` **client** version in the container may differ from the host's
+   NetworkManager **daemon** version. Profile *writes* therefore go through
+   raw D-Bus (`gdbus`, `Settings.AddConnection`) instead of `nmcli con
+   add`/`con mod`: with a version skew, `nmcli con add/mod` fails with
+   `… : unknown property` while a raw D-Bus dict does not. `nmcli` is still
+   used for reads and activation. If you see the `unknown property` error,
+   check `docker compose exec broxy4g command -v gdbus`
+   (Debian `libglib2.0-bin` package).
 
 ### Using docker compose
 

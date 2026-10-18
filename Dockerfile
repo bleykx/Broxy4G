@@ -38,9 +38,20 @@ FROM python:3.11-slim AS runtime
 #               already exists in the adapter if ping is unavailable)
 # adb: Android Debug Bridge binary, needed for smartphone dongles (transport
 #      `adb`); its path is made explicit via BROXY4G_ADB_PATH below
-# (NetworkManager is NOT installed: nmcli is not used inside the container)
+# network-manager: provides nmcli, the D-Bus client for the HOST's
+#      NetworkManager (reached through /run/dbus), required by the smartphone
+#      ADB transport (RNDIS profile); no NM daemon runs in the container.
+#      Used for profile READS and activation (`con up`) only.
+# libglib2.0-bin: provides gdbus, used for the RNDIS profile WRITES
+#      (`Settings.AddConnection`). Workaround for a measured client/daemon
+#      version skew: the container's libnm (1.52) serializes a property
+#      the host's NM daemon (1.46) does not know, so `nmcli con add/mod`
+#      fails with `unknown property`; a raw D-Bus dict does not.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     modemmanager nftables iproute2 curl ca-certificates iputils-ping adb \
+    network-manager libglib2.0-bin \
+    && test -x /usr/bin/nmcli \
+    && test -x /usr/bin/gdbus \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker CLI and its plugins (docker-compose, docker-buildx)
