@@ -5,34 +5,11 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from broxy4g.adapters.modem_manager import BearerIpConfig, ModemInfo
 from broxy4g.api.app import create_app
 from broxy4g.domain.dongle import Dongle
-from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.services.discovery import DiscoveredDongle
 from broxy4g.services.proxy_health import ProxyHealthService
-
-
-async def _enroll_online_via_app(app, imei, interface, table_id, fwmark) -> Dongle:
-    """Enrôle un dongle via l'app, le passe en ONLINE avec modem+bearer prêts pour un reset DONE."""
-    enrollment_service = app.state.enrollment_service
-    dongle = (await enrollment_service.enroll(IdentityMaterial(imei=imei), "Test", "test.apn")).dongle
-    dongle.state = DongleState.ONLINE
-    dongle.interface_name = interface
-    dongle.route_table_id = table_id
-    dongle.fwmark = fwmark
-    await enrollment_service.dongle_repo.save(dongle)
-    app.state.modem.add_modem(ModemInfo(
-        path=interface, imei=imei, iccid=None,
-        usb_serial=None, state="connected", interface_name=interface,
-    ))
-    app.state.modem.set_bearer_ip(interface, BearerIpConfig(
-        address="10.0.0.1", prefix=30, gateway="10.0.0.2"
-    ))
-    # Le gate de propagation d'IP publique rend DONE seulement si la sonde est OK.
-    app.state.connectivity.set_public_ip("203.0.113.9")
-    return dongle
 
 
 @pytest.fixture
@@ -141,16 +118,33 @@ class TestEnrollApi:
 
 
 class TestResetApi:
-    async def test_reset_single_returns_done(self, client, app, auth_headers):
-        dongle = await _enroll_online_via_app(app, "123456789012345", "wwan0", 10001, 1)
+    async def test_reset_single_returns_done(self, client, app, auth_headers, enroll_online):
+        dongle = await enroll_online("123456789012345", "wwan0", 10001, 1)
 
         response = await client.post(f"/api/v1/dongles/{dongle.id}/reset", headers=auth_headers)
 
         assert response.status_code == 200
         assert response.json()["status"] == "DONE"
 
-    async def test_reset_single_returns_pending_when_already_running(self, client, app, auth_headers):
-        dongle = await _enroll_online_via_app(app, "123456789012345", "wwan0", 10001, 1)
+    async def test_reset_single_lock_param_locks_next_reset(self, client, app, auth_headers, enroll_online):
+        """POST single ``?lock=120`` : DONE arme le verrou manuel, 2e POST → LOCK (JSON)."""
+        dongle = await enroll_online("123456789012345", "wwan0", 10001, 1)
+
+        first = await client.post(f"/api/v1/dongles/{dongle.id}/reset?lock=120", headers=auth_headers)
+
+        assert first.status_code == 200
+        assert first.json()["status"] == "DONE"
+        assert app.state.reset_lockout.is_locked(str(dongle.id))
+
+        second = await client.post(f"/api/v1/dongles/{dongle.id}/reset", headers=auth_headers)
+
+        assert second.status_code == 200
+        body = second.json()
+        assert body["status"] == "LOCK"
+        assert "verrouillé" in (body["message"] or "")
+
+    async def test_reset_single_returns_pending_when_already_running(self, client, app, auth_headers, enroll_online):
+        dongle = await enroll_online("123456789012345", "wwan0", 10001, 1)
         app.state.reset_lock.acquire(str(dongle.id))  # un reset tourne déjà
 
         response = await client.post(f"/api/v1/dongles/{dongle.id}/reset", headers=auth_headers)
@@ -160,9 +154,9 @@ class TestResetApi:
         assert body["status"] == "PENDING"
         assert body["message"] == "reset déjà en cours"
 
-    async def test_reset_batch_returns_result_per_dongle(self, client, app, auth_headers):
-        d1 = await _enroll_online_via_app(app, "123456789012345", "wwan0", 10001, 1)
-        d2 = await _enroll_online_via_app(app, "987654321098765", "wwan1", 10002, 2)
+    async def test_reset_batch_returns_result_per_dongle(self, client, app, auth_headers, enroll_online):
+        d1 = await enroll_online("123456789012345", "wwan0", 10001, 1)
+        d2 = await enroll_online("987654321098765", "wwan1", 10002, 2)
 
         response = await client.post(
             "/api/v1/dongles/reset",
@@ -176,10 +170,10 @@ class TestResetApi:
         assert results[str(d1.id)]["status"] == "DONE"
         assert results[str(d2.id)]["status"] == "DONE"
 
-    async def test_reset_batch_pending_and_error(self, client, app, auth_headers):
+    async def test_reset_batch_pending_and_error(self, client, app, auth_headers, enroll_online):
         """Batch HTTP : DONE pour un dongle sain, PENDING pour un pré-verrouillé, ERROR pour un inconnu."""
-        d1 = await _enroll_online_via_app(app, "123456789012345", "wwan0", 10001, 1)
-        d2 = await _enroll_online_via_app(app, "987654321098765", "wwan1", 10002, 2)
+        d1 = await enroll_online("123456789012345", "wwan0", 10001, 1)
+        d2 = await enroll_online("987654321098765", "wwan1", 10002, 2)
         app.state.reset_lock.acquire(str(d2.id))  # d2 pré-verrouillé → PENDING
         unknown = uuid4()
 

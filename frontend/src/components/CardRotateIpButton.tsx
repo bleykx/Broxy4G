@@ -53,6 +53,8 @@ export const CardRotateIpButton: React.FC<CardRotateIpButtonProps> = ({
       setOpen(false);
       if (res.status === 'PENDING') {
         onNotice({ kind: 'warning', text: `A reset is already in progress for “${dongle.label}”.` });
+      } else if (res.status === 'LOCK') {
+        onNotice({ kind: 'warning', text: `This proxy is locked after a recent reset; try again later or unlock it.` });
       } else if (res.status === 'ERROR') {
         onNotice({ kind: 'error', text: res.message || `Reset failed for “${dongle.label}”.` });
       } else {

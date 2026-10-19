@@ -136,8 +136,9 @@ amortis par une garde par dongle (services/reset_throttle.py) : un **cooldown**
 minimal entre deux resets exécutés (défaut 60 s) et un **plafond** de resets par
 fenêtre glissante (défaut 5 / 600 s). Une demande dans le cooldown renvoie
 `PENDING` (message cooldown), un dépassement du plafond renvoie `ERROR`
-(message commençant par « reset refusé ») ; les statuts restent exactement
-`DONE` / `ERROR` / `PENDING`. Le refus est évalué **avant** la prise de verrou
+(message commençant par « reset refusé ») ; les statuts restent
+`DONE` / `ERROR` / `PENDING` (le `LOCK` du verrou manuel, ci-dessous, s'y
+ajoute). Le refus est évalué **avant** la prise de verrou
 et ne touche **jamais** le matériel (pas de reset modem, pas de changement
 d'état du dongle) ; l'historique est en mémoire (un redémarrage du service le
 réinitialise).
@@ -152,8 +153,22 @@ Le critère est le verdict de sonde, pas le delta d'IP (caveat CGNAT). Après un
 `DONE`, une fenêtre de répit par dongle en mémoire (domain/post_done_window.py,
 défaut 15 s) renvoie `PENDING` à toute nouvelle demande sans re-resetter le
 matériel ; elle est (re)posée seulement par un `DONE` (un refus ne la
-ré-horodate jamais) et est distincte du verrou et du throttle. Ordre des
-vérifications : throttle → fenêtre post-DONE → verrou.
+ré-horodate jamais) et est distincte du verrou et du throttle.
+
+**Verrou manuel du reset** : le reset single (POST/GET, pas le batch) accepte
+un paramètre de query optionnel `?lock=<secondes>` (borne de sécurité fixe :
+86400 s = 24 h, pas de variable d'environnement). À la fin d'un reset
+réellement `DONE`, le verrou manuel par dongle en mémoire
+(domain/reset_lockout.py) est armé pour `lock` secondes : pendant ce délai,
+toute demande de reset renvoie le statut métier exact `LOCK` (message avec le
+temps restant), **sans toucher le proxy** — le conteneur 3proxy continue de
+servir, aucune action nftables/réseau/conteneur. Le verrou n'est armé que sur
+un `DONE` (jamais sur un refus, un `PENDING` ou un `ERROR`), est levé par
+expiration ou par l'endpoint authentifié `GET /api/v1/dongles/{id}/unlock`
+(idempotent, `DONE`/`ERROR` en texte brut, no-store), et est perdu au
+redémarrage du service. Ordre des vérifications : verrou manuel → throttle →
+fenêtre post-DONE → verrou de reset ; après un unlock, le throttle et la
+fenêtre post-DONE restent applicables.
 
 ONLINE    ──(reset)───► RESETTING
 DEGRADED  ──(reset)───► RESETTING

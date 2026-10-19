@@ -33,6 +33,29 @@ class TestQueryAuthEnabled:
         response = await client.get("/api/v1/dongles?user=admin")
         assert response.status_code == 401
 
+    async def test_reset_query_auth_with_lock_then_unlock(self, client, app, query_auth, enroll_online):
+        """Bout en bout : reset GET via query auth + ``lock``, LOCK au 2e appel, unlock."""
+        dongle = await enroll_online("123456789012345", "wwan0", 10001, 1)
+        reset_url = f"/api/v1/dongles/{dongle.id}/reset?user=admin&password=test-pass&lock=5"
+
+        first = await client.get(reset_url)
+
+        assert first.status_code == 200
+        assert first.text == "DONE"
+
+        second = await client.get(reset_url)
+
+        assert second.status_code == 200
+        assert second.text == "LOCK"
+
+        unlock = await client.get(
+            f"/api/v1/dongles/{dongle.id}/unlock?user=admin&password=test-pass"
+        )
+
+        assert unlock.status_code == 200
+        assert unlock.text == "DONE"
+        assert not app.state.reset_lockout.is_locked(str(dongle.id))
+
     async def test_malformed_header_not_fallback_to_query(self, client, query_auth):
         # L'en-tête présent (même mal formé) fait autorité : pas de fallback query.
         response = await client.get(

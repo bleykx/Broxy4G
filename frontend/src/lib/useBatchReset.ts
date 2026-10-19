@@ -53,6 +53,7 @@ export function useBatchReset(dongles: DongleSummary[], onSettled: () => Promise
   const summarize = (results: ResetBatchItem[]): BatchNotice => {
     const done = results.filter(r => r.status === 'DONE').length;
     const pending = results.filter(r => r.status === 'PENDING').length;
+    const locked = results.filter(r => r.status === 'LOCK').length;
     const failed = results.filter(r => r.status === 'ERROR');
     const labelOf = (id: string) => dongles.find(d => d.id === id)?.label ?? id;
     const failures = failed.map(r => ({
@@ -62,9 +63,10 @@ export function useBatchReset(dongles: DongleSummary[], onSettled: () => Promise
     const parts: string[] = [];
     if (done > 0) parts.push(`${done} done`);
     if (pending > 0) parts.push(`${pending} pending`);
+    if (locked > 0) parts.push(`${locked} locked`);
     if (failed.length > 0) parts.push(`${failed.length} failed`);
     return {
-      kind: failed.length > 0 ? 'error' : pending > 0 ? 'warning' : 'success',
+      kind: failed.length > 0 ? 'error' : pending > 0 || locked > 0 ? 'warning' : 'success',
       text: `Batch reset finished: ${parts.join(', ')}.`,
       failures,
     };

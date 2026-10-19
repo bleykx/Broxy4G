@@ -55,6 +55,8 @@ export const Dashboard: React.FC = () => {
       const res = await api.dongles.reset(dongle.id);
       if (res.status === 'PENDING') {
         setNotice({ kind: 'warning', text: `A reset is already in progress for “${dongle.label}”.` });
+      } else if (res.status === 'LOCK') {
+        setNotice({ kind: 'warning', text: 'This proxy is locked after a recent reset; try again later or unlock it.' });
       } else if (res.status === 'ERROR') {
         setNotice({ kind: 'error', text: res.message || `Reset failed for “${dongle.label}”.` });
       } else {

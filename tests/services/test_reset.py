@@ -12,7 +12,9 @@ from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.domain.post_done_window import ResetPostDoneWindow
 from broxy4g.domain.proxy import ProxyState
+from broxy4g.domain.reset_lockout import ResetLockout
 from broxy4g.services.reset import ResetService
+from broxy4g.services.reset_throttle import ResetThrottle
 from broxy4g.services.uplink_probe import PublicIpVerdict
 
 
@@ -605,6 +607,126 @@ async def test_post_done_window_refusals_never_remark(
     clock.t = 16.0
     # Si un refus ré-horodait, la fenêtre expirerait à 7 + 15 = 22, pas 15.
     assert (await svc.reset(dongle.id)).status == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_reset_lock_seconds_arms_lockout_after_done(
+    reset_service, enrollment_service, fake_modem
+):
+    """``lock_seconds=120`` : DONE arme le verrou manuel ; la 2e demande renvoie
+    LOCK (message « verrouillé ») sans re-resetter le matériel."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+
+    first = await reset_service.reset(dongle.id, lock_seconds=120)
+
+    assert first.status == "DONE"
+    assert reset_service.lockout.is_locked(str(dongle.id))
+
+    second = await reset_service.reset(dongle.id, lock_seconds=60)
+
+    assert second.status == "LOCK"
+    assert "verrouillé" in (second.message or "")
+    assert len(fake_modem.reset_calls) == 1  # le refus LOCK ne touche pas le matériel
+
+
+@pytest.mark.asyncio
+async def test_reset_lockout_then_unlock_allows_reset_again(
+    enrollment_service, connection_service, dongle_repo, proxy_repo, proxy_service,
+    fake_modem, fake_reset_lock, fake_connectivity,
+):
+    """unlock → DONE, verrou levé, le reset suivant n'est plus LOCK."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+    fake_connectivity.set_public_ip("10.64.0.1")
+    clock = _ControllableClock()
+    svc = ResetService(
+        dongle_repo, proxy_repo, connection_service, proxy_service, fake_reset_lock,
+        ip_wait_attempts=1, ip_wait_delay=0.0,
+        done_window=ResetPostDoneWindow(seconds=15.0, clock=clock),
+        lockout=ResetLockout(clock=clock),
+        throttle=ResetThrottle(cooldown_seconds=60.0, clock=clock),
+    )
+
+    first = await svc.reset(dongle.id, lock_seconds=120)
+    assert first.status == "DONE"
+    assert svc.lockout.is_locked(str(dongle.id))
+    assert (await svc.reset(dongle.id)).status == "LOCK"
+
+    unlock = await svc.unlock(dongle.id)
+    assert unlock.status == "DONE"
+    assert not svc.lockout.is_locked(str(dongle.id))
+
+    clock.t = 100.0  # cooldown et fenêtre post-DONE expirés
+    third = await svc.reset(dongle.id)
+    assert third.status != "LOCK"
+    assert third.status == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_reset_error_does_not_arm_lockout(
+    reset_service, enrollment_service, fake_modem
+):
+    """Un reset en échec (état interdit) avec ``lock_seconds`` → ERROR, pas de lock."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1,
+        state=DongleState.DISCOVERED,
+    )
+
+    result = await reset_service.reset(dongle.id, lock_seconds=120)
+
+    assert result.status == "ERROR"
+    assert result.message == "reset impossible dans l'état DISCOVERED"
+    assert not reset_service.lockout.is_locked(str(dongle.id))
+
+
+@pytest.mark.asyncio
+async def test_unlock_unknown_dongle_returns_error(reset_service):
+    result = await reset_service.unlock(uuid4())
+    assert result.status == "ERROR"
+    assert result.message == "dongle introuvable"
+
+
+@pytest.mark.asyncio
+async def test_unlock_is_idempotent_on_unlocked_dongle(
+    reset_service, enrollment_service, fake_modem
+):
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+
+    first = await reset_service.unlock(dongle.id)
+    again = await reset_service.unlock(dongle.id)
+
+    assert first.status == "DONE"
+    assert again.status == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_lock_guard_precedes_throttle(
+    enrollment_service, connection_service, dongle_repo, proxy_repo, proxy_service,
+    fake_modem, fake_reset_lock, fake_connectivity,
+):
+    """Le refus LOCK est évalué avant la garde anti-tempête : LOCK, pas PENDING."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+    fake_connectivity.set_public_ip("10.64.0.1")
+    throttle = ResetThrottle(cooldown_seconds=60.0)
+    throttle.record(str(dongle.id))  # cooldown actif : PENDING si la garde était avant
+    lockout = ResetLockout()
+    svc = ResetService(
+        dongle_repo, proxy_repo, connection_service, proxy_service, fake_reset_lock,
+        throttle=throttle, lockout=lockout,
+    )
+    lockout.lock(str(dongle.id), 120.0)
+
+    result = await svc.reset(dongle.id)
+
+    assert result.status == "LOCK"
+    assert "verrouillé" in (result.message or "")
 
 
 @pytest.mark.asyncio

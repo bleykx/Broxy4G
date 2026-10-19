@@ -184,4 +184,5 @@ def build_service_graph(app: FastAPI, data_dir: str | None) -> None:
         throttle=ResetThrottle.from_env(),
         reset_timeout=_env_float("BROXY4G_RESET_TIMEOUT_SECONDS", 300.0),
         done_window=ResetPostDoneWindow(seconds=_env_float("BROXY4G_RESET_POST_DONE_SECONDS", 15.0)),
+        lockout=app.state.reset_lockout,
     )

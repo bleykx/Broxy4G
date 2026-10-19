@@ -3,7 +3,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-ResetStatus = Literal["DONE", "ERROR", "PENDING"]
+ResetStatus = Literal["DONE", "ERROR", "PENDING", "LOCK"]
 
 
 class ResetResult(BaseModel):

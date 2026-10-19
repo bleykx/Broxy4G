@@ -23,6 +23,7 @@ from broxy4g.api.routers.session import router as session_router
 from broxy4g.api.routers.settings import router as settings_router
 from broxy4g.api.wiring import _build_apn_source, build_service_graph
 from broxy4g.domain.apn_resolution import ApnResolver
+from broxy4g.domain.reset_lockout import ResetLockout
 from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.allowed_host_repository import AllowedHostRepository
 from broxy4g.repositories.dongle_repository import DongleRepository
@@ -91,6 +92,7 @@ def create_app(
     app.state.local_uplink = local_uplink or FakeLocalUplink()
     app.state.connectivity = connectivity or FakeConnectivity()
     app.state.reset_lock = reset_lock or ResetLock()
+    app.state.reset_lockout = ResetLockout()
     app.state.metrics_snapshot = MetricsSnapshot()
     app.state.apn_source = apn_source if apn_source is not None else _build_apn_source()
     app.state.adb = adb or FakeAdb()

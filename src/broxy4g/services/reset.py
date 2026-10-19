@@ -1,41 +1,25 @@
 import asyncio
 import logging
-from dataclasses import dataclass
+import math
 from uuid import UUID
 
 from broxy4g.domain.degraded_arbiter import ProbeVerdict
 from broxy4g.domain.dongle_states import DongleState, InvalidStateTransition
 from broxy4g.domain.post_done_window import ResetPostDoneWindow
+from broxy4g.domain.reset_lockout import ResetLockout
 from broxy4g.domain.reset_states import ResetInProgressError, ResetLock
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
 from broxy4g.services.connection import ConnectionService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
+from broxy4g.services.public_ip_gate import await_public_ip
 from broxy4g.services.reset_failure_policy import record_reset_failure, uplink_broken
-from broxy4g.services.reset_throttle import CAP, ResetThrottle
+from broxy4g.services.reset_outcome import ResetOutcome, throttled_outcome
+from broxy4g.services.reset_throttle import ResetThrottle
 from broxy4g.services.uplink_probe import PublicIpVerdict
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class ResetOutcome:
-    status: str
-    message: str | None = None
-
-
-def _throttled(reason: str, throttle: ResetThrottle) -> ResetOutcome:
-    """Statut métier d'un reset refusé par la garde anti-tempête (pas de matériel touché)."""
-    if reason == CAP:
-        return ResetOutcome(
-            "ERROR",
-            f"reset refusé : trop de resets rapprochés (max {throttle.max_per_window} par {throttle.window_seconds:g}s)",
-        )
-    return ResetOutcome(
-        "PENDING",
-        f"reset en cooldown : un reset récent (< {throttle.cooldown_seconds:g}s) est déjà appliqué",
-    )
 
 
 class ResetService:
@@ -50,6 +34,7 @@ class ResetService:
         reset_timeout: float = 300.0,
         throttle: ResetThrottle | None = None,
         done_window: ResetPostDoneWindow | None = None,
+        lockout: ResetLockout | None = None,
         ip_wait_attempts: int = 15,
         ip_wait_delay: float = 2.0,
     ):
@@ -63,19 +48,33 @@ class ResetService:
         self.throttle = throttle
         # Fenêtre post-DONE TOUJORS active : 15 s de répit après un reset réussi.
         self.done_window = done_window or ResetPostDoneWindow()
+        # Verrou manuel temporaire (en mémoire) : bloque uniquement les resets.
+        self.lockout = lockout or ResetLockout()
         self.ip_wait_attempts = ip_wait_attempts
         self.ip_wait_delay = ip_wait_delay
 
-    async def reset(self, dongle_id: UUID) -> ResetOutcome:
-        # Garde anti-tempête : le refus précède le verrou et ne touche pas le matériel.
+    async def reset(self, dongle_id: UUID, lock_seconds: float | None = None) -> ResetOutcome:
+        # Verrou manuel : refus ``LOCK`` avant toute autre garde ; le proxy
+        # continue de servir et rien n'est touché (ni throttle, ni matériel).
         key = str(dongle_id)
+        if self.lockout.is_locked(key):
+            remaining = self.lockout.remaining(key)
+            logger.info(
+                "reset dongle %s refusé : proxy verrouillé manuellement (%.0fs restants)",
+                dongle_id, remaining,
+            )
+            return ResetOutcome(
+                "LOCK",
+                f"proxy verrouillé : reset indisponible pendant encore {math.ceil(remaining)}s",
+            )
+        # Garde anti-tempête : le refus précède le verrou et ne touche pas le matériel.
         if self.throttle is not None:
             reason = self.throttle.reject(key)
             if reason is not None:
                 logger.info(
                     "reset dongle %s refusé par la garde anti-tempête (%s)", dongle_id, reason
                 )
-                return _throttled(reason, self.throttle)
+                return throttled_outcome(reason, self.throttle)
         if self.done_window.in_window(key):
             logger.info("reset dongle %s refusé : fenêtre de répit post-reset en cours", dongle_id)
             return ResetOutcome("PENDING", "fenêtre de répit post-reset : un reset vient d'aboutir")
@@ -100,7 +99,25 @@ class ResetService:
             self.lock.release(key, token)
         if outcome.status == "DONE":
             self.done_window.mark_done(key)
+            # Le verrou manuel n'est armé qu'à la fin d'un reset réellement DONE
+            # (jamais sur un refus, un PENDING ou un ERROR).
+            if lock_seconds is not None and lock_seconds > 0:
+                self.lockout.lock(key, lock_seconds)
+                logger.info("proxy dongle %s verrouillé %.0fs après reset", dongle_id, lock_seconds)
         return outcome
+
+    async def unlock(self, dongle_id: UUID) -> ResetOutcome:
+        """Lève le verrou manuel de reset (idempotent) : action admin journalisée.
+
+        Ne touche ni le throttle, ni la fenêtre post-DONE, ni le ``ResetLock``,
+        ni le matériel : le proxy continue de servir.
+        """
+        dongle = await self.dongle_repo.get_by_id(dongle_id)
+        if not dongle:
+            return ResetOutcome("ERROR", "dongle introuvable")
+        self.lockout.unlock(str(dongle_id))
+        logger.info("déverrouillage manuel du reset dongle %s (action admin)", dongle_id)
+        return ResetOutcome("DONE", "proxy déverrouillé")
 
     async def _run_reset(self, dongle_id: UUID) -> ResetOutcome:
         dongle = await self.dongle_repo.get_by_id(dongle_id)
@@ -145,8 +162,12 @@ class ResetService:
                 await self.proxy.resume(existing_proxy.id)
 
             metrics = await self.connection.get_metrics(dongle_id)
-            probe = await self._await_public_ip(
-                dongle_id, PublicIpVerdict(metrics.public_ip_verdict, metrics.public_ip)
+            probe = await await_public_ip(
+                self.connection,
+                dongle_id,
+                PublicIpVerdict(metrics.public_ip_verdict, metrics.public_ip),
+                self.ip_wait_attempts,
+                self.ip_wait_delay,
             )
             if self.metrics_snapshot is not None:
                 signal = metrics.signal_quality.percent if metrics.signal_quality else None
@@ -183,20 +204,6 @@ class ResetService:
             mark_error = await uplink_broken(self.connection, dongle_id)
             await record_reset_failure(self.dongle_repo, dongle_id, message, mark_error)
             return ResetOutcome("ERROR", message)
-
-    async def _await_public_ip(self, dongle_id: UUID, initial: PublicIpVerdict) -> PublicIpVerdict:
-        """Attend la propagation de l'IP publique (verdict de sonde ``OK``)."""
-        probe = initial
-        for _ in range(self.ip_wait_attempts):
-            if probe.verdict is ProbeVerdict.OK:
-                return probe
-            await asyncio.sleep(self.ip_wait_delay)
-            try:
-                probe = await self.connection.get_public_ip_verdict(dongle_id)
-            except Exception:
-                logger.warning("Sonde IP publique indécidable après reset dongle %s", dongle_id)
-                probe = PublicIpVerdict(ProbeVerdict.FAILED, None)
-        return probe
 
     async def reset_many(self, dongle_ids: list[UUID]) -> list[tuple[UUID, ResetOutcome]]:
         """Reset plusieurs dongles en parallèle. Un reset par dongle, indépendant.

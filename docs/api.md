@@ -371,8 +371,9 @@ operation is wrapped in a bounded timeout (`BROXY4G_RESET_TIMEOUT_SECONDS`,
 default `300 s`); the per-dongle lock is always released on completion, timeout
 or cancellation.
 
-**The reset contract and its status codes (`DONE` / `ERROR` / `PENDING`) are
-unchanged and apply identically to both transports** (`modem` and `adb`).
+**The reset contract and its status codes (`DONE` / `ERROR` / `PENDING`, plus
+`LOCK` for the manual lock described below) apply identically to both
+transports** (`modem` and `adb`).
 For a smartphone the recovery mechanism differs from a modem: instead of a USB
 re-enumeration, the reset performs a bounded airplane-mode radio cycle
 (double `enable`/`disable`) and waits for the phone to come back
@@ -398,10 +399,15 @@ is actually working.
 }
 ```
 
-- `status` is one of `DONE`, `ERROR`, `PENDING`.
+- `status` is one of `DONE`, `ERROR`, `PENDING`, `LOCK`.
 - `message` is `null` on success (`DONE`), a fixed explanation on `PENDING`
-  (reset already in progress, or within the post-`DONE` grace window), and the
-  failure detail when the status is `ERROR`.
+  (reset already in progress, or within the post-`DONE` grace window),
+  the remaining-time explanation on `LOCK` (manual lock active, see below),
+  and the failure detail when the status is `ERROR`.
+- `LOCK` is returned with HTTP `200` while the **manual lock** is active for
+  that dongle: the request is refused **before any other guard** (throttle,
+  grace window, per-dongle lock) and touches nothing — no hardware, no
+  nftables, no containers. The proxy keeps serving. See *Manual lock* below.
 - `PENDING` is returned with HTTP `200` (not `409`) in two situations:
   - a reset is already **in progress** for that dongle (per-dongle lock held):
     the request was accepted and the reset is being handled by the
@@ -422,8 +428,9 @@ amortised by a per-dongle guard (cooldown default `60 s`, cap default
 requested while a previous executed reset is younger than the cooldown returns
 `PENDING` with a cooldown message; a reset beyond the per-window cap returns
 `ERROR` with a message beginning with `reset refusé`. Refusals never touch the
-hardware. The status set stays exactly `DONE` / `ERROR` / `PENDING` (the GET
-`text/plain` body contract is unchanged).
+hardware. (The status set is now `DONE` / `ERROR` / `PENDING` / `LOCK`, with
+`LOCK` added by the manual lock — the GET `text/plain` body contract is
+otherwise unchanged.)
 
 **Post-`DONE` grace window.** A short grace window (default `15 s`,
 `BROXY4G_RESET_POST_DONE_SECONDS`) follows every `DONE`: a new reset requested
@@ -433,7 +440,35 @@ public IP. The window is per-dongle, in-memory, and distinct from both the
 per-dongle lock ("reset **in progress**", consumed by reconciliation and USB
 recovery) and the anti-storm throttle ("rate limiting"). It is (re)started only
 by a `DONE` — a refusal by the window never re-times it. The order of checks is
-throttle → grace window → lock.
+manual lock → throttle → grace window → per-dongle lock.
+
+**Manual lock (`?lock=<seconds>`).** The single reset (POST and GET, **not**
+the batch) accepts an optional query parameter `lock` with the number of
+seconds to lock further resets **after this one succeeds** — e.g.
+`?lock=120`. Absent, empty or `lock=0` means no lock; any value that is not an
+integer, is negative, or exceeds the fixed security bound `86400` (24 h)
+returns HTTP `400`. The lock is only armed at the end of a reset that really
+returned `DONE` — never on a refusal, a `PENDING` or an `ERROR`. While active,
+any reset request for that dongle is refused with `LOCK` (and a remaining-time
+message) **before** the throttle, the grace window and the per-dongle lock are
+evaluated. The lock is per-dongle and in-memory, so it is lost on service
+restart; it **never suspends the proxy** — the 3proxy container keeps serving
+and no nftables/routing/container action is performed. It is released by
+expiration or by the authenticated `GET /api/v1/dongles/{id}/unlock` endpoint
+below. Note that after an unlock, the anti-storm throttle and the post-`DONE`
+grace window still apply normally to the next reset.
+
+**Unlock a dongle.** `GET /api/v1/dongles/{id}/unlock`
+
+Releases the manual reset lock of a dongle. Same authentication as the reset
+routes: `Authorization: Basic ...` header, or opt-in query auth
+`?user=<user>&password=<password>` (placeholder values here) when
+`BROXY4G_ALLOW_QUERY_AUTH` is enabled. The response is the raw business status
+as `text/plain` — exactly `DONE` (lock released, or nothing was locked —
+**idempotent**) or `ERROR` (unknown dongle) — with no trailing newline and
+HTTP `200`, and carries `Cache-Control: no-store` and `Pragma: no-cache`.
+Unlocking never touches the throttle, the grace window, the per-dongle reset
+lock, or the hardware.
 
 **GET variant.** `GET /api/v1/dongles/{id}/reset` is exposed for external
 GET-only tools (Ankabot) that can pass only a URL — combine it with the
@@ -442,8 +477,9 @@ Behaviour is identical to the POST variant: same `ResetService`, same
 per-dongle lock (a concurrent reset returns `PENDING`), same idempotence and
 `DONE` / `ERROR` / `PENDING` statuses. Unlike the POST, which returns the
 JSON `{"status": ..., "message": ...}` payload, the GET variant returns the
-**raw business status** as a `text/plain` body: exactly `DONE`, `ERROR` or
-`PENDING` — the exact body, with no trailing newline and HTTP `200`. This is
+**raw business status** as a `text/plain` body: exactly `DONE`, `ERROR`,
+`PENDING` or `LOCK` — the exact body, with no trailing newline and HTTP `200`.
+This is
 what a GET-only tool compares against (Ankabot expects the body `DONE`).
 The GET response carries `Cache-Control: no-store` and `Pragma: no-cache` so
 the outcome of an administrative action is never cached. The trigger is

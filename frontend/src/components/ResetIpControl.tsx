@@ -25,6 +25,8 @@ export const ResetIpControl: React.FC<ResetIpControlProps> = ({ dongleId, dongle
       setOpen(false);
       if (res.status === 'PENDING') {
         onNotice({ kind: 'warning', text: 'A reset is already in progress for this dongle.' });
+      } else if (res.status === 'LOCK') {
+        onNotice({ kind: 'warning', text: 'This proxy is locked after a recent reset; try again later or unlock it.' });
       } else if (res.status === 'ERROR') {
         onNotice({ kind: 'error', text: res.message || 'Reset failed.' });
       } else {

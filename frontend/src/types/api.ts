@@ -137,7 +137,7 @@ export interface ProxyListenInterfaceSetting {
   interface_name: string | null;
 }
 
-export type ResetStatus = 'DONE' | 'ERROR' | 'PENDING';
+export type ResetStatus = 'DONE' | 'ERROR' | 'PENDING' | 'LOCK';
 
 export interface ResetResponse {
   status: ResetStatus;
