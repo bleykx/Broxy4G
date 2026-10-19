@@ -81,6 +81,37 @@ else
     log "NM hardening installed (no-auto-default=*)"
 fi
 
+# 8c. dhcpcd hardening (Raspberry Pi OS only: dhcpcd runs alongside NetworkManager).
+# Without this, dhcpcd takes a SECOND DHCP lease on smartphone USB interfaces
+# (enx*) and installs a default route in table main via the dongle — an
+# isolation leak that the app's guard_default_route then deletes at every
+# rebind. See docs/networking.md (section « dhcpcd »).
+DHCPCD_CONF="/etc/dhcpcd.conf"
+DHCPCD_DENY='denyinterfaces dongle* enx* wwan* wwx*'
+if [[ ! -f "$DHCPCD_CONF" ]]; then
+    log "dhcpcd not present (no $DHCPCD_CONF) — skipping dhcpcd hardening"
+elif grep -qF "$DHCPCD_DENY" "$DHCPCD_CONF"; then
+    log "dhcpcd denyinterfaces already in place"
+else
+    cp -a "$DHCPCD_CONF" "${DHCPCD_CONF}.broxy4g.bak"
+    if grep -q '^[[:space:]]*denyinterfaces' "$DHCPCD_CONF"; then
+        sed -i "0,/^[[:space:]]*denyinterfaces.*/s//${DHCPCD_DENY}/" "$DHCPCD_CONF"
+    else
+        sed -i "1i ${DHCPCD_DENY}" "$DHCPCD_CONF"
+    fi
+    log "dhcpcd denyinterfaces installed (backup: ${DHCPCD_CONF}.broxy4g.bak)"
+    # SIGHUP the manager: dhcpcd re-reads its config and deconfigures the
+    # interfaces it no longer manages. NEVER restart/stop dhcpcd: a restart
+    # would deconfigure ALL managed interfaces, including the management uplink.
+    DHCPCD_PID="$(systemctl show -p MainPID --value dhcpcd 2>/dev/null || echo 0)"
+    if [[ "$DHCPCD_PID" =~ ^[0-9]+$ ]] && (( DHCPCD_PID > 0 )); then
+        kill -HUP "$DHCPCD_PID"
+        log "SIGHUP sent to dhcpcd (pid $DHCPCD_PID) — rogue lease/routes deconfigured"
+    else
+        warn "dhcpcd is not running — denyinterfaces applies at its next start"
+    fi
+fi
+
 # 9. systemd service
 cp "$REPO_ROOT/deploy/broxy4g.service" /etc/systemd/system/broxy4g.service
 log "systemd service installed"

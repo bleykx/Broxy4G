@@ -26,8 +26,9 @@ sudo deploy/install.sh
 The script is safe to re-run for upgrades. It performs all manual steps
 documented below: system user, directories, PolicyKit rule, udev rules
 (Android USB access), NetworkManager hardening (`no-auto-default=*`, see
-`docs/networking.md`), systemd service, env file, Python venv, frontend
-build, and service start.
+`docs/networking.md`), dhcpcd hardening (`denyinterfaces`, SIGHUP,
+Raspberry Pi OS only — see `docs/networking.md`), systemd service, env
+file, Python venv, frontend build, and service start.
 
 > **Tip:** If `frontend/dist` is not yet built, either build it first
 > (`cd frontend && npm ci && npm run build`) or have Node.js installed so the
@@ -96,6 +97,33 @@ sudo systemctl restart NetworkManager
 Restarting NetworkManager (or a reboot) applies the pattern. If the pattern
 is missing or too narrow, NetworkManager may take over the dongle interface
 and break the dedicated routing table / bearer IP configuration.
+
+### dhcpcd: deny Broxy4G-managed interfaces (Raspberry Pi OS)
+
+Raspberry Pi OS runs `dhcpcd` alongside NetworkManager. Without the line
+`denyinterfaces dongle* enx* wwan* wwx*` in `/etc/dhcpcd.conf`, dhcpcd takes
+a **second DHCP lease** on smartphone USB interfaces (`enx*`) and installs a
+default route in table `main` via the dongle — an isolation leak (mechanism,
+measured evidence and the two distinct vectors — this one and NM
+`no-auto-default=*` — are documented in `docs/networking.md`).
+
+`deploy/install.sh` performs this step idempotently (step 8c: no-op when the
+line is already present, backup in `/etc/dhcpcd.conf.broxy4g.bak`, skipped
+with a log on hosts without dhcpcd) and applies it with **SIGHUP** to the
+dhcpcd manager (`kill -HUP "$(systemctl show -p MainPID --value dhcpcd)"`),
+which deconfigures only the interfaces dhcpcd no longer manages. **Never**
+`systemctl restart dhcpcd`: a restart runs `dhcpcd -x` and deconfigures
+**all** managed interfaces, including the management uplink.
+
+Manual equivalent (only on hosts where `/etc/dhcpcd.conf` exists):
+
+```bash
+sudo cp -a /etc/dhcpcd.conf /etc/dhcpcd.conf.broxy4g.bak
+# replace the first existing `denyinterfaces …` line with:
+#   denyinterfaces dongle* enx* wwan* wwx*
+# or insert that line as the first line if none exists
+sudo kill -HUP "$(systemctl show -p MainPID --value dhcpcd)"
+```
 
 ### Stable dongle netdev names (systemd `.link` files, multi-dongle hosts)
 

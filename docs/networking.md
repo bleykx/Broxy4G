@@ -355,6 +355,56 @@ Condition d'application : sur un hôte dont l'uplink de gestion dépend d'une
 connexion NM **auto-générée** (`Wired connection N`), il faut d'abord un
 profil persisté pour cet uplink avant d'activer le réglage.
 
+#### dhcpcd (Raspberry Pi OS) : second bail DHCP — vecteur distinct, le
+`no-auto-default` ne suffisait pas
+
+Raspberry Pi OS fait tourner **`dhcpcd` en plus de NetworkManager**
+(mesuré : `dhcpcd 10.0.6`). Tant que `/etc/dhcpcd.conf` ne dénie que les
+interfaces modem (`denyinterfaces dongle*`), `dhcpcd` prend un **second bail
+DHCP** sur l'interface USB Ethernet/RNDIS du téléphone (`enx<mac>`, adresse
+secondaire `192.168.172.79`) et **pose une route par défaut dans la table
+`main`** via le dongle, ré-annoncée à chaque rebind. Le garde-fou applicatif
+(`guard_default_route`) la supprime à chaque occurrence (log
+`ACTION ADMIN : route par défaut de la table main via … — suppression`),
+mais la fuite revient. Le réglage NM `no-auto-default=*` (paragraphe
+ci-dessus) traite un **autre vecteur**, réel mais distinct (connexion
+volatile générée par NM pendant la réécriture de profil) : **il ne suffisait
+pas à lui seul** — les deux correctifs coexistent.
+
+Preuve mesurée (2026-10-19, Pi ; heure locale = UTC+2 ; aucune activité
+NetworkManager ni connexion NM étrangère à ces instants) : les trois
+corrélations ajout/suppression correspondent exactement aux trois
+occurrences du garde-fou :
+
+```
+Oct 19 10:47:56 dhcpcd: enx02360c7c147a: adding default route via 192.168.172.245
+Oct 19 10:48:23 dhcpcd: enx02360c7c147a: pid 1751 deleted default route via 192.168.172.245   ← garde-fou
+Oct 19 10:52:51 dhcpcd: enx02360c7c147a: adding default route via 192.168.172.245
+Oct 19 10:53:29 dhcpcd: enx02360c7c147a: pid 6314 deleted default route via 192.168.172.245   ← garde-fou
+Oct 19 11:17:55 dhcpcd: enx02360c7c147a: adding default route via 192.168.172.245
+Oct 19 11:18:09 dhcpcd: enx02360c7c147a: pid 28470 deleted default route via 192.168.172.245  ← garde-fou
+```
+
+**Correctif** : la ligne canonique `denyinterfaces dongle* enx* wwan* wwx*`
+dans `/etc/dhcpcd.conf`, couvrant toutes les conventions de nommage
+Broxy4G : `enx*` = interface USB Ethernet/RNDIS dérivée de la MAC (identité
+matérielle stable, cf. `AGENTS.md`), `wwan*`/`wwx*` = netdev modem/WiFi USB,
+`dongle*` = interfaces renommées par fichiers udev `.link`.
+Installation **idempotente** par `deploy/install.sh` (étape 8c : no-op si la
+ligne est déjà présente, sauvegarde `/etc/dhcpcd.conf.broxy4g.bak`, hôte sans
+dhcpcd → log et sortie sans échec). Application par **SIGHUP au manager**
+(`kill -HUP "$(systemctl show -p MainPID --value dhcpcd)"`) : dhcpcd relit
+sa configuration et **déconfigure** les interfaces qu'il ne gère plus (le
+bail fautive, sa route par défaut et le process BPF disparaissent
+immédiatement). **Jamais** `systemctl restart dhcpcd` : le restart lancerait
+`dhcpcd -x` et déconfigurerait **toutes** les interfaces gérées, y compris
+l'uplink de gestion.
+
+Vérification sans régression après application (même hôte) : adresse
+primaire `.78` intacte, table dédiée `10003` et règle
+`from 192.168.172.78 lookup 10003` intacts, egress du dongle inchangé,
+eth0/SSH intacts, garde-fou muet ensuite.
+
 ### Même table dédiée, mêmes artefacts
 
 À partir du bearer ainsi résolu, les **mêmes** quatre artefacts de la table
