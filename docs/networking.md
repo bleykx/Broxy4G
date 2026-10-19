@@ -256,6 +256,31 @@ antérieur (nom d'interface) + avertissement, jamais d'exception ;
 `_verify_profile` vérifie alors la MAC (ou le nom d'interface en repli) et
 refuse tout profil périmé.
 
+- **Payload NM du profil (mesuré, Pi / Ubuntu 24.04, démon NM 1.46 / client
+  nmcli 1.52)** : `mac-address` appartient au setting `802-3-ethernet`, de
+  type D-Bus `ay` (tableau d'octets) : forme acceptée
+  `'802-3-ethernet': {'mac-address': <[byte 0xNN, …]>}` (6 octets, hexadécimal
+  minuscule). Mesures de rejet : `connection.mac-address` →
+  `InvalidProperty: connection.mac-address: unknown property` ; forme chaîne
+  dans `802-3-ethernet` → `can't set property of type 'ay' from value of
+  type 's'` ; `@ay […]` ou `b'…'` sans `<…>` → erreur de parsing GVariant ;
+  `<b'\x02…'>` accepté comme `ay` mais les échappements sont perdus (NM relit la
+  chaîne ASCII). Un profil lié par MAC ne porte **ni** `connection.interface-name`
+  **ni** de `mac-address` dans le setting `connection`.
+- **Vérification de la liaison (mesuré, même hôte)** :
+  `nmcli -g 802-3-ethernet.mac-address con show <profil>` rend la MAC en
+  **majuscules avec les `:` échappés d'un antislash**
+  (`02\:36\:0C\:7C\:14\:7A`) : la comparaison doit normaliser les deux côtés
+  (retrait des antislashs + minuscules), sinon elle échoue
+  systématiquement. Fail-closed : après écriture, une identité relue
+  **positive et fausse** entraîne la **suppression** du profil écrit (un
+  profil sans liaison valide est activable sur n'importe quelle interface
+  ethernet) ; un échec **non concluant** (nmcli en erreur, champ de
+  politique faux, identité vide) ne supprime rien. Limite connue
+  (comportement antérieur, inchangé) : la branche « profil déjà présent
+  mais non conforme » supprime le profil avant réécriture, y compris quand la
+  non-conformité vient d'un échec transitoire de `nmcli`.
+
 **Pourquoi** (défaut mesuré, Pi / Ubuntu 24.04 / NM 1.46) : une connexion NM
 auto pré-existante liée à la même interface par `interface-name`
 (ex. `Wired connection 1`, `autoconnect=yes`) reste **candidate** quand notre
@@ -303,6 +328,17 @@ connexion des étrangères). L'énumération n'utilise que des champs **autoris�
 commande entièrement) ; le parsing (`network_manager_cli_output.py`) tolère le
 séparateur `:`, les champs vides et ne lève jamais d'exception.
 
+- **Store NM adossé à netplan (mesuré, même hôte)** : les connexions NM sont
+  persistées en `/etc/netplan/90-NM-<uuid>.yaml` et générées en
+  `/run/NetworkManager/system-connections/netplan-NM-<uuid>.nmconnection` ;
+  le store classique `/etc/NetworkManager/system-connections/` est **vide**.
+  Toute modification d'une connexion NM réécrit le miroir netplan (mtimes
+  observés). Conséquence pour l'isolation : supprimer une connexion
+  étrangère via D-Bus (`Settings.Connection.Delete`) supprime **aussi** son
+  YAML netplan et son keyfile `/run` (mesuré) → pas de résurrection par `netplan
+  generate` au démarrage. `READONLY=no` sur ces connexions : l'écriture et la
+  suppression D-Bus restent possibles.
+
 **Garantie durable recommandée (hôte)** : `[main] no-auto-default=*` dans
 `/etc/NetworkManager/NetworkManager.conf` (ou un `conf.d/*.conf`) interdit à
 NM de créer **toute** route par défaut automatique, quelle que soit la
@@ -333,6 +369,15 @@ du bearer** (`curl --interface <IP>`, `ping -I <IP>` —
 trafic doit suivre la table dédiée et sortir par la netdev RNDIS : sans la
 règle `from <IP du bail>`, ces sondes suivraient la table `main` et mesureraient
 l'uplink de l'hôte.
+
+#### Effet mesuré d'un reset réussi (2026-10-19, Pi)
+
+Profil réécrit lié par MAC (uuid **régénéré**), `ipv4.route-metric=21000`,
+`never-default=yes`, `ipv6.method=disabled`. La table `main` conserve
+**un seul défaut IPv4** (via l'interface de management) ; la table dédiée
+du dongle garde **un seul** `default` via la passerelle du téléphone ;
+règle `ip rule from <source> lookup <table>` ; l'IP publique de sortie
+change effectivement (mesuré : `37.167.48.237` → `37.167.127.125`).
 
 ### Garde-fou : jamais de route par défaut de l'hôte via le téléphone
 
@@ -513,6 +558,31 @@ it never changes the egress pinning.
 - This is a graceful contract: an absent or addressless listen interface is never
   an error that stops a proxy or crashes reconciliation — it only withholds the
   publication until the interface is back.
+
+## Isolation d'un proxy pendant un reset de dongle
+
+Le reset d'un dongle **met le conteneur proxy en pause**
+(`docker compose down --remove-orphans`) puis le **reprend**
+(`docker compose up -d`), `enabled` étant conservé. Défaut mesuré
+(2026-10-19, Pi / Ubuntu 24.04) : la réconciliation des proxies (boucle
+30 s) ne tenait pas compte du reset ; voyant le conteneur absent, elle
+lançait un second `docker compose up` concurrent avec la reprise du
+reset → `Error response from daemon: Conflict. The container name
+"/broxy4g-proxy-<uuid>" is already in use by container "<id>"` → proxy
+`CRASHED`, reset en `ERROR` alors que l'uplink était sain (la sonde
+d'IP publique n'était jamais atteinte).
+Correctifs : (1) `ProxyReconciler` applique **le même interlock que le
+chemin dongle** — un proxy de dongle est ignoré si le dongle est
+`RESETTING` **et** que le verrou de reset est réellement tenu ; un
+`RESETTING` **sans** verrou (état résiduel post-crash/reboot) est restauré
+normalement ; (2) les opérations `docker compose` (`up`/`down`/`restart`/
+`remove`) sont **sérialisées en single-flight** au niveau du processus, et
+en cas de conflit « already in use by container », `up` **adopte** le conteneur
+uniquement si **exactement un** conteneur porte les labels
+`com.docker.compose.project=<projet>` **et** `com.docker.compose.service=proxy` **et**
+est à l'état `running` ; sinon l'erreur d'origine est relevée.
+Preuve de recette après correctif : journal `Proxy <id> ignoré : reset du dongle
+<id> en cours` pendant le reset, reset `DONE`, aucun conflit, proxy `RUNNING`.
 
 ## Auto-réparation du bridge proxy et sonde de santé
 
