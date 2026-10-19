@@ -78,6 +78,7 @@ class ReconciliationWorker:
             provisioning=provisioning,
             docker_compose=docker_compose,
             local_connections=local_connections,
+            reset_lock=reset_lock,
         )
         verdicts = ConnectivityVerdictService(DegradedArbiter(min_consecutive=min_consecutive))
         self.adb_soft_recovery = AdbSoftRecovery(

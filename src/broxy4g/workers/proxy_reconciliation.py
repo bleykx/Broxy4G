@@ -2,7 +2,9 @@
 import logging
 
 from broxy4g.adapters.docker_compose import DockerComposeAdapter
+from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.proxy import ProxySource
+from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
 from broxy4g.services.local_connections import LocalConnectionsService
@@ -21,12 +23,14 @@ class ProxyReconciler:
         provisioning: ProxyProvisioningService,
         docker_compose: DockerComposeAdapter,
         local_connections: LocalConnectionsService | None = None,
+        reset_lock: ResetLock | None = None,
     ):
         self.proxy_repo = proxy_repo
         self.dongle_repo = dongle_repo
         self.provisioning = provisioning
         self.docker_compose = docker_compose
         self.local_connections = local_connections
+        self.reset_lock = reset_lock
 
     async def reconcile_proxies(self) -> None:
         """Réaligne chaque proxy sur son état désiré (activé/désactivé)."""
@@ -53,6 +57,8 @@ class ProxyReconciler:
 
     async def reconcile_proxy(self, proxy) -> None:
         """Recrée/redémarre un proxy activé, arrête un proxy désactivé."""
+        if await self._skip_while_reset(proxy):
+            return
         state = await self.docker_compose.state(proxy.container_name)
         if proxy.enabled:
             if state != "running":
@@ -65,6 +71,31 @@ class ProxyReconciler:
         elif state == "running":
             logger.info("Proxy %s désactivé mais actif, arrêt", proxy.id)
             await self.provisioning.down(proxy)
+
+    async def _skip_while_reset(self, proxy) -> bool:
+        """Le reset en cours gère-t-il lui-même le proxy de ce dongle ?
+
+        Sémantique de ``ReconciliationWorker._reset_in_progress`` : un reset
+        réellement en cours (RESETTING ET verrou tenu) est ignoré, le reset
+        gère le conteneur proxy par lui-même. Un RESETTING SANS verrou est un
+        état résiduel post-crash/reboot : on restaure normalement. Un dongle
+        introuvable n'est pas concerné (l'orphelin est géré par ``_is_orphan``).
+        """
+        if (
+            proxy.source_type is not ProxySource.DONGLE
+            or proxy.dongle_id is None
+            or self.reset_lock is None
+        ):
+            return False
+        dongle = await self.dongle_repo.get_by_id(proxy.dongle_id)
+        if dongle is None:
+            return False
+        if dongle.state == DongleState.RESETTING and self.reset_lock.is_locked(str(proxy.dongle_id)):
+            logger.info(
+                "Proxy %s ignoré : reset du dongle %s en cours", proxy.id, proxy.dongle_id
+            )
+            return True
+        return False
 
     async def _is_orphan(self, proxy) -> bool:
         """Un proxy de dongle dont le dongle n'existe plus est orphelin."""

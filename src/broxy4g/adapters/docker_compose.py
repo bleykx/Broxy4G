@@ -3,13 +3,23 @@
 Distinct de :mod:`broxy4g.adapters.docker` (gestion de conteneurs unitaires).
 """
 
+import asyncio
+import logging
 import os
 import re
 from typing import Protocol, runtime_checkable
 
 from .shell import ShellAdapter
 
+logger = logging.getLogger(__name__)
+
 _PROJECT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+
+# Verrou de processus (single-flight) : sérialise up/down/restart/remove pour
+# TOUTES les instances. Deux `docker compose up` du même projet ne peuvent
+# plus s'entrelacer (conflit "container name ... already in use" entre un
+# reset et la boucle de réconciliation).
+_COMPOSE_OP_LOCK = asyncio.Lock()
 
 
 @runtime_checkable
@@ -74,21 +84,72 @@ class RealDockerCompose:
             )
 
     async def up(self, project: str, compose_dir: str) -> None:
-        await self._run_checked("docker compose up", [*self._base(project, compose_dir), "up", "-d"])
+        base = self._base(project, compose_dir)
+        async with _COMPOSE_OP_LOCK:
+            result = await self.shell.run([*base, "up", "-d"])
+            if result.returncode == 0:
+                return
+            error = RuntimeError(
+                f"docker compose up failed (rc={result.returncode}): "
+                f"{result.stderr or result.stdout}"
+            )
+            if "already in use by container" not in (result.stderr + result.stdout):
+                raise error
+            # Conflit de nom : un `up` concurrent a probablement créé le
+            # conteneur. On l'adopte s'il est bien le nôtre (labels projet +
+            # service) et s'il tourne ; sinon l'erreur d'origine est relevée.
+            if await self._adopt_running_container(project):
+                logger.warning(
+                    "Conteneur %s déjà créé par un `up` concurrent, adoption", project
+                )
+                return
+            raise error
 
     async def down(self, project: str, compose_dir: str) -> None:
-        await self._run_checked(
-            "docker compose down", [*self._base(project, compose_dir), "down", "--remove-orphans"]
-        )
+        async with _COMPOSE_OP_LOCK:
+            await self._run_checked(
+                "docker compose down",
+                [*self._base(project, compose_dir), "down", "--remove-orphans"],
+            )
 
     async def restart(self, project: str, compose_dir: str) -> None:
-        await self._run_checked("docker compose restart", [*self._base(project, compose_dir), "restart"])
+        async with _COMPOSE_OP_LOCK:
+            await self._run_checked(
+                "docker compose restart",
+                [*self._base(project, compose_dir), "restart"],
+            )
 
     async def remove(self, project: str, compose_dir: str) -> None:
-        await self._run_checked(
-            "docker compose remove",
-            [*self._base(project, compose_dir), "down", "--remove-orphans", "-v"],
+        async with _COMPOSE_OP_LOCK:
+            await self._run_checked(
+                "docker compose remove",
+                [*self._base(project, compose_dir), "down", "--remove-orphans", "-v"],
+            )
+
+    async def _adopt_running_container(self, project: str) -> bool:
+        """Vrai si exactement un conteneur `running` porte les labels proxy du projet.
+
+        Un conteneur non identifiable par ces deux labels n'est jamais adopté.
+        """
+        result = await self.shell.run(
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+                "--filter",
+                "label=com.docker.compose.service=proxy",
+                "--format",
+                "{{.Names}}|{{.State}}",
+            ]
         )
+        if result.returncode != 0:
+            return False
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        if len(lines) != 1:
+            return False
+        return lines[0].rsplit("|", 1)[-1].strip() == "running"
 
     async def published_host_ports(self) -> set[int]:
         """Ports hôte publiés par tous les conteneurs (``docker ps -a``).
