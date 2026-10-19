@@ -339,15 +339,21 @@ séparateur `:`, les champs vides et ne lève jamais d'exception.
   generate` au démarrage. `READONLY=no` sur ces connexions : l'écriture et la
   suppression D-Bus restent possibles.
 
-**Garantie durable recommandée (hôte)** : `[main] no-auto-default=*` dans
-`/etc/NetworkManager/NetworkManager.conf` (ou un `conf.d/*.conf`) interdit à
-NM de créer **toute** route par défaut automatique, quelle que soit la
-connexion — c'est la couverture structurelle de la fuite ci-dessus.
-`deploy/install.sh` **ne l'applique pas encore** : c'est un changement global
-du comportement réseau de l'hôte (toutes les connexions auto perdraient leur
-route par défaut automatique, y compris l'uplink de gestion de l'hôte) ; à
-appliquer manuellement **et uniquement** sur des hôtes dont l'accès réseau ne
-dépend pas d'une connexion NM auto, puis redémarrer NetworkManager.
+**Garantie durable appliquée (hôte)** : `[main] no-auto-default=*` est installé
+par `deploy/install.sh` dans
+`/etc/NetworkManager/conf.d/98-broxy4g-no-auto-default.conf` (idempotent :
+comparaison du contenu, redémarrage de NetworkManager **seulement** si le
+contenu change). Mécanisme : NM ne **crée plus** de connexion automatique pour
+un périphérique sans profil → la connexion volatile (route par défaut) à
+l'origine de la fuite ci-dessus ne peut plus naître pendant la fenêtre
+suppression/réécriture du profil d'un dongle. Ce qui **n'est pas** affecté :
+les connexions persistées (profils netplan/cloud-init, profils de dongles de
+l'application) et leurs routes. Mesuré le 2026-10-19 sur le Pi : sorties
+publiques des 3 dongles et uplink de gestion inchangés après application +
+redémarrage de NetworkManager, aucune nouvelle occurrence du garde-fou.
+Condition d'application : sur un hôte dont l'uplink de gestion dépend d'une
+connexion NM **auto-générée** (`Wired connection N`), il faut d'abord un
+profil persisté pour cet uplink avant d'activer le réglage.
 
 ### Même table dédiée, mêmes artefacts
 

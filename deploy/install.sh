@@ -68,6 +68,19 @@ else
     log "udev rules installed (Android USB access for group broxy4g)"
 fi
 
+# 8b. NetworkManager hardening: never auto-create a default connection for a
+# profile-less device (isolation leak during dongle profile rewrites)
+NM_CONF_SRC="$REPO_ROOT/deploy/98-broxy4g-no-auto-default.conf"
+NM_CONF_DST="/etc/NetworkManager/conf.d/98-broxy4g-no-auto-default.conf"
+if [[ -f "$NM_CONF_DST" ]] && cmp -s "$NM_CONF_SRC" "$NM_CONF_DST"; then
+    log "NM hardening up to date"
+else
+    mkdir -p /etc/NetworkManager/conf.d
+    install -m 0644 "$NM_CONF_SRC" "$NM_CONF_DST"
+    systemctl restart NetworkManager
+    log "NM hardening installed (no-auto-default=*)"
+fi
+
 # 9. systemd service
 cp "$REPO_ROOT/deploy/broxy4g.service" /etc/systemd/system/broxy4g.service
 log "systemd service installed"

@@ -6,12 +6,14 @@ import pytest
 
 from broxy4g.adapters.connectivity import FakeConnectivity
 from broxy4g.adapters.modem_manager import BearerIpConfig, ModemInfo
+from broxy4g.domain.degraded_arbiter import ProbeVerdict
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.domain.post_done_window import ResetPostDoneWindow
 from broxy4g.domain.proxy import ProxyState
 from broxy4g.services.reset import ResetService
+from broxy4g.services.uplink_probe import PublicIpVerdict
 
 
 async def _enroll_in_state(
@@ -603,3 +605,88 @@ async def test_post_done_window_refusals_never_remark(
     clock.t = 16.0
     # Si un refus ré-horodait, la fenêtre expirerait à 7 + 15 = 22, pas 15.
     assert (await svc.reset(dongle.id)).status == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_reset_exception_keeps_dongle_when_uplink_probe_ok(
+    reset_service, enrollment_service, proxy_service, dongle_repo, fake_modem
+):
+    """Exception d'infrastructure (reprise du proxy) + sonde d'IP publique ``OK`` :
+    le reset retourne ``ERROR`` et ``last_error`` est renseigné, mais le dongle
+    n'est PAS marqué ``ERROR`` (son état est conservé) — marquer ``ERROR``
+    déclencherait une ré-énumération USB destructive (usb_recovery) sur un
+    lien qui fonctionne."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+
+    with patch.object(
+        proxy_service, "resume",
+        new=AsyncMock(side_effect=RuntimeError("conflit Docker transitoire")),
+    ):
+        result = await reset_service.reset(dongle.id)
+
+    assert result.status == "ERROR"
+    assert "conflit Docker transitoire" in (result.message or "")
+    stored = await dongle_repo.get_by_id(dongle.id)
+    assert stored.state == DongleState.ONLINE
+    assert stored.last_error == "RuntimeError: conflit Docker transitoire"
+
+
+@pytest.mark.asyncio
+async def test_reset_exception_marks_error_when_uplink_probe_failed(
+    reset_service, enrollment_service, connection_service, proxy_service, dongle_repo,
+    fake_modem,
+):
+    """Exception d'infrastructure + sonde ``FAILED`` : uplink cassé → le dongle
+    est marqué ``ERROR`` (récupération) et ``last_error`` est renseigné."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+
+    with (
+        patch.object(
+            proxy_service, "resume",
+            new=AsyncMock(side_effect=RuntimeError("conflit Docker transitoire")),
+        ),
+        patch.object(
+            connection_service, "get_public_ip_verdict",
+            new=AsyncMock(return_value=PublicIpVerdict(ProbeVerdict.FAILED, None)),
+        ),
+    ):
+        result = await reset_service.reset(dongle.id)
+
+    assert result.status == "ERROR"
+    stored = await dongle_repo.get_by_id(dongle.id)
+    assert stored.state == DongleState.ERROR
+    assert stored.last_error == "RuntimeError: conflit Docker transitoire"
+
+
+@pytest.mark.asyncio
+async def test_reset_exception_marks_error_when_probe_raises(
+    reset_service, enrollment_service, connection_service, proxy_service, dongle_repo,
+    fake_modem,
+):
+    """Exception d'infrastructure + sonde qui lève (indécidable) : fail-safe
+    conservé — le dongle est marqué ``ERROR``."""
+    dongle = await _enroll_in_state(
+        enrollment_service, fake_modem, "123456789012345", "wwan0", 10001, 1
+    )
+
+    with (
+        patch.object(
+            proxy_service, "resume",
+            new=AsyncMock(side_effect=RuntimeError("conflit Docker transitoire")),
+        ),
+        patch.object(
+            connection_service, "get_public_ip_verdict",
+            new=AsyncMock(side_effect=RuntimeError("sonde indisponible")),
+        ),
+    ):
+        result = await reset_service.reset(dongle.id)
+
+    assert result.status == "ERROR"
+    assert "conflit Docker transitoire" in (result.message or "")
+    stored = await dongle_repo.get_by_id(dongle.id)
+    assert stored.state == DongleState.ERROR
+    assert stored.last_error

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from broxy4g.domain.degraded_arbiter import ProbeVerdict
-from broxy4g.domain.dongle_states import DongleState, InvalidStateTransition, can_transition
+from broxy4g.domain.dongle_states import DongleState, InvalidStateTransition
 from broxy4g.domain.post_done_window import ResetPostDoneWindow
 from broxy4g.domain.reset_states import ResetInProgressError, ResetLock
 from broxy4g.repositories.dongle_repository import DongleRepository
@@ -12,6 +12,7 @@ from broxy4g.repositories.proxy_repository import ProxyRepository
 from broxy4g.services.connection import ConnectionService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
+from broxy4g.services.reset_failure_policy import record_reset_failure, uplink_broken
 from broxy4g.services.reset_throttle import CAP, ResetThrottle
 from broxy4g.services.uplink_probe import PublicIpVerdict
 
@@ -173,16 +174,14 @@ class ResetService:
             # Échec : pas de reprise du conteneur (uplink non fiable) ; il
             # reste arrêté avec ``enabled`` conservé, la réconciliation le
             # restaurera plus tard.
+            #
+            # Marquage ``ERROR`` seulement si l'uplink est cassé (sonde d'IP
+            # publique non ``OK``) : un lien sain conserve son état — marquer
+            # ``ERROR`` déclencherait une ré-énumération USB destructive
+            # (``usb_recovery``) sur un dongle qui fonctionne.
             message = f"{type(exc).__name__}: {exc}"
-            try:
-                d = await self.dongle_repo.get_by_id(dongle_id)
-                if d:
-                    d.last_error = message
-                    if can_transition(d.state, DongleState.ERROR):
-                        d.change_state(DongleState.ERROR)
-                    await self.dongle_repo.save(d)
-            except Exception:
-                logger.exception("Échec de la récupération d'état après reset dongle %s", dongle_id)
+            mark_error = await uplink_broken(self.connection, dongle_id)
+            await record_reset_failure(self.dongle_repo, dongle_id, message, mark_error)
             return ResetOutcome("ERROR", message)
 
     async def _await_public_ip(self, dongle_id: UUID, initial: PublicIpVerdict) -> PublicIpVerdict:

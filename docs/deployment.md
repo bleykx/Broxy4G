@@ -25,7 +25,8 @@ sudo deploy/install.sh
 
 The script is safe to re-run for upgrades. It performs all manual steps
 documented below: system user, directories, PolicyKit rule, udev rules
-(Android USB access), systemd service, env file, Python venv, frontend
+(Android USB access), NetworkManager hardening (`no-auto-default=*`, see
+`docs/networking.md`), systemd service, env file, Python venv, frontend
 build, and service start.
 
 > **Tip:** If `frontend/dist` is not yet built, either build it first
