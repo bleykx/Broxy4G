@@ -75,12 +75,16 @@ def verify_out_ifname(metric: int = PROFILE_METRIC, interface: str = IFACE) -> s
 def gdbus_write_cmd(name: str = NAME, mac: str = MAC, metric: int = PROFILE_METRIC) -> list[str]:
     """argv exact de l'écriture du profil par D-Bus brut (dict GVariant compris).
 
-    Le profil est lié par MAC (``802-3-ethernet.mac-address``), sans
-    ``connection.interface-name``.
+    Le profil est lié par MAC : setting ``802-3-ethernet`` portant
+    ``mac-address`` en ``ay`` (``<[byte 0xNN, …]>``, hex minuscule), bloc
+    ``connection`` sans ``mac-address`` ni ``interface-name`` (forme
+    mesurée acceptée par NM — cf. ``nm_profile_payload``).
     """
+    data = ", ".join(f"byte 0x{int(p, 16):02x}" for p in mac.lower().split(":"))
     variant = (
         f"{{'connection': {{'id': <'{name}'>, 'type': <'802-3-ethernet'>, "
-        f"'mac-address': <'{mac.lower()}'>, 'autoconnect': <true>}}, "
+        f"'autoconnect': <true>}}, "
+        f"'802-3-ethernet': {{'mac-address': <[{data}]>}}, "
         f"'ipv4': {{'method': <'auto'>, 'never-default': <true>, "
         f"'route-metric': <{metric}>}}, 'ipv6': {{'method': <'disabled'>}}}}"
     )
@@ -413,7 +417,13 @@ async def test_ensure_profile_writes_via_gdbus_when_absent():
     assert len(writes) == 1  # une seule écriture
     assert writes[0] == gdbus_write_cmd()  # argv exact, dict GVariant compris
     variant = writes[0][-1]
-    assert f"'mac-address': <'{MAC.lower()}'>" in variant  # lié par identité matérielle
+    # Liaison par identité matérielle : setting dédié, type ay, hex minuscule.
+    assert (
+        "'802-3-ethernet': {'mac-address': "
+        "<[byte 0x02, byte 0x36, byte 0x0c, byte 0x7c, byte 0x14, byte 0x7a]>}" in variant
+    )
+    connection_block = variant.split(", '802-3-ethernet':")[0]
+    assert "mac-address" not in connection_block  # jamais dans le bloc connection (NM : unknown property)
     assert "'interface-name'" not in variant  # jamais lié au nom d'interface
     for command in shell.calls:  # plus aucun con add / con mod (cassé par le décalage de versions)
         assert command[1:3] not in (["con", "add"], ["con", "mod"])
@@ -478,6 +488,84 @@ async def test_ensure_profile_falls_back_to_interface_name_when_mac_unreadable(c
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert IFACE in warnings[0].getMessage()
+
+
+async def test_ensure_profile_falls_back_when_mac_invalid(caplog):
+    """(d) MAC non None mais non convertible en 6 octets hex → repli sur
+    interface-name + warning, jamais d'exception ni de profil refusé par NM."""
+    shell = make_shell(profile_present=False, mac=None)  # réponses du repli ifname
+    with caplog.at_level(logging.WARNING):
+        assert await RealNetworkManager(shell).ensure_profile(IFACE, "zz:36:0c:7c:14:7a", NAME) is True
+
+    writes = [c for c in shell.calls if c[0] == "gdbus"]
+    assert writes == [gdbus_write_cmd_ifname()]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "zz:36:0c:7c:14:7a" in warnings[0].getMessage()
+
+
+def nmcli_escaped_mac(value: str = MAC) -> str:
+    """Sortie terse mesurée de ``nmcli -g 802-3-ethernet.mac-address`` :
+    majuscules + ``:`` échappés d'un antislash."""
+    return value.upper().replace(":", "\\:")
+
+
+async def test_verify_profile_conforming_with_escaped_uppercase_mac():
+    """(e) Relecture mesurée ``02\\:36\\:0C\\:7C\\:14\\:7A`` → conforme : profil
+    présent, aucune écriture, aucune suppression (normalisation antislash + casse)."""
+    shell = make_shell(profile_present=True)
+    shell.set_response(
+        verify_cmd(),
+        ShellResult(0, f"auto\nyes\ndisabled\n{PROFILE_METRIC}\nyes\n{nmcli_escaped_mac()}\n", ""),
+    )
+
+    assert await RealNetworkManager(shell).ensure_profile(IFACE, MAC, NAME) is True
+    assert shell.calls == [["nmcli", "con", "show", NAME], verify_cmd()]
+
+
+async def test_ensure_profile_deletes_written_profile_on_positive_wrong_identity(caplog):
+    """(e) Fail-closed : écriture réussie mais identité lue **positive et fausse**
+    (autre MAC) → suppression du profil juste écrit (activable sur n'importe
+    quelle interface), retour False."""
+    shell = make_shell(profile_present=False)
+    shell.set_response(verify_cmd(), ShellResult(0, verify_out(mac="02:36:0c:7c:99:99"), ""))
+    shell.set_response(["nmcli", "con", "delete", NAME], ShellResult(0, "", ""))
+    with caplog.at_level(logging.WARNING):
+        assert await RealNetworkManager(shell).ensure_profile(IFACE, MAC, NAME) is False
+
+    assert shell.calls == [
+        ["nmcli", "con", "show", NAME],  # profil absent : pas de vérification préalable
+        gdbus_write_cmd(),
+        verify_cmd(),  # identité positive et fausse (autre MAC)
+        ["nmcli", "con", "delete", NAME],  # fail-closed : suppression du profil écrit
+    ]
+    assert any("défaut d'isolation" in r.getMessage() for r in caplog.records)
+
+
+async def test_ensure_profile_no_deletion_when_verify_fails_nonconclusive():
+    """(e) Échec **non concluant** post-écriture (nmcli rc ≠ 0) → False sans
+    supprimer le profil (pas de destruction sur incident transitoire)."""
+    shell = RecordingShell()
+    shell.set_response(
+        ["nmcli", "con", "show", NAME], ShellResult(1, "", "Error: connection not found"),
+    )
+    shell.set_response(verify_cmd(), ShellResult(1, "", "Error: connection not found"))
+    shell.set_response(
+        gdbus_write_cmd(), ShellResult(0, "(objectpath '/org/freedesktop/NetworkManager/Settings/5',)\n", ""),
+    )
+
+    assert await RealNetworkManager(shell).ensure_profile(IFACE, MAC, NAME) is False
+    assert [c for c in shell.calls if c[1:3] == ["con", "delete"]] == []
+
+
+async def test_ensure_profile_no_deletion_when_non_identity_field_wrong():
+    """(e) Champ non-identité faux (metric) avec identité correcte → non concluant :
+    False sans suppression du profil."""
+    shell = make_shell(profile_present=False)
+    shell.set_response(verify_cmd(), ShellResult(0, f"auto\nyes\ndisabled\n1\nyes\n{MAC}\n", ""))
+
+    assert await RealNetworkManager(shell).ensure_profile(IFACE, MAC, NAME) is False
+    assert [c for c in shell.calls if c[1:3] == ["con", "delete"]] == []
 
 
 async def test_ensure_profile_written_settings_never_default_and_ipv6_disabled():
