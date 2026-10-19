@@ -140,6 +140,17 @@ body {
   background: var(--accent-hover);
 }
 
+.btn-subtle {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.btn-subtle:hover:not(:disabled) {
+  background: var(--border-color);
+  color: var(--text-main);
+}
+
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -857,7 +868,7 @@ body {
   margin: -0.5rem 0 0;
 }
 
-/* One-time credentials dialog */
+/* Credentials dialog */
 .credentials {
   display: flex;
   flex-direction: column;

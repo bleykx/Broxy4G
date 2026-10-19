@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -61,6 +63,7 @@ def create_app(
     adb: AdbAdapter | None = None,
     nm: NetworkManagerAdapter | None = None,
     data_dir: str | None = None,
+    proxy_secret_key_path: Path | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Broxy4G API", version="0.1.0")
 
@@ -92,6 +95,7 @@ def create_app(
     app.state.apn_source = apn_source if apn_source is not None else _build_apn_source()
     app.state.adb = adb or FakeAdb()
     app.state.nm = nm or FakeNetworkManager()
+    app.state.proxy_secret_key_path = proxy_secret_key_path
 
     build_service_graph(app, data_dir)
 

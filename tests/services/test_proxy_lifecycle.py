@@ -7,6 +7,7 @@ from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.domain.proxy import Proxy, ProxySource, ProxyState
 from broxy4g.domain.proxy_isolation import ISOLATION_TABLE
+from broxy4g.services.proxy_lifecycle import CredentialsUnavailable
 
 
 async def _seed_dongle(dongle_repo) -> object:
@@ -100,6 +101,53 @@ async def test_rotate_credentials_changes_user(proxy_service, dongle_repo):
     assert credentials.password
     assert reloaded.auth_user == credentials.username
     assert reloaded.auth_user != previous_user
+
+
+@pytest.mark.asyncio
+async def test_create_persists_encrypted_password(proxy_service, dongle_repo, secret_box):
+    dongle_id = await _seed_dongle(dongle_repo)
+    provisioned = await proxy_service.create(dongle_id, enabled=False)
+    stored = await proxy_service.get(provisioned.proxy.id)
+    assert stored.password_encrypted is not None
+    assert secret_box.decrypt(stored.password_encrypted) == provisioned.credentials.password
+
+
+@pytest.mark.asyncio
+async def test_rotate_persists_encrypted_password(proxy_service, dongle_repo, secret_box):
+    dongle_id = await _seed_dongle(dongle_repo)
+    provisioned = await proxy_service.create(dongle_id, enabled=False)
+    credentials = await proxy_service.rotate_credentials(provisioned.proxy.id)
+    stored = await proxy_service.get(provisioned.proxy.id)
+    assert secret_box.decrypt(stored.password_encrypted) == credentials.password
+
+
+@pytest.mark.asyncio
+async def test_get_credentials_returns_plaintext(proxy_service, dongle_repo, secret_box):
+    dongle_id = await _seed_dongle(dongle_repo)
+    provisioned = await proxy_service.create(dongle_id, enabled=False)
+    credentials = await proxy_service.get_credentials(provisioned.proxy.id)
+    assert credentials.username == provisioned.proxy.auth_user
+    assert credentials.password == secret_box.decrypt(provisioned.proxy.password_encrypted)
+
+
+@pytest.mark.asyncio
+async def test_get_credentials_legacy_row_unavailable(proxy_service, dongle_repo, proxy_repo):
+    """Ligne sans password_encrypted (pré-migration) : non récupérable → rotation."""
+    dongle_id = await _seed_dongle(dongle_repo)
+    provisioned = await proxy_service.create(dongle_id, enabled=False)
+    stored = await proxy_repo.get_by_id(provisioned.proxy.id)
+    stored.password_encrypted = None
+    await proxy_repo.save(stored)
+    with pytest.raises(CredentialsUnavailable):
+        await proxy_service.get_credentials(provisioned.proxy.id)
+
+
+@pytest.mark.asyncio
+async def test_get_credentials_unknown_proxy_raises(proxy_service):
+    from uuid import uuid4
+
+    with pytest.raises(ValueError):
+        await proxy_service.get_credentials(uuid4())
 
 
 @pytest.mark.asyncio

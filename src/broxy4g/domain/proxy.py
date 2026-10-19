@@ -38,6 +38,10 @@ class Proxy:
     id: UUID = field(default_factory=uuid4)
     auth_user: str | None = None
     password_hash: str | None = None  # format 3proxy CR ; jamais le mot de passe clair
+    # Mot de passe clair chiffré au repos (Fernet) : sert uniquement à la
+    # consultation authentifiée via l'API. ``None`` pour les lignes antérieures
+    # au stockage chiffré (non récupérables, une rotation est nécessaire).
+    password_encrypted: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     source_type: ProxySource = ProxySource.DONGLE

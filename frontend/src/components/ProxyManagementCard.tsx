@@ -6,6 +6,7 @@ import { StateBadge } from './StateBadge';
 import { ConfirmDialog } from './ConfirmDialog';
 import { CredentialsDialog } from './CredentialsDialog';
 import { MetricRow } from './MetricRow';
+import { ProxyActions } from './ProxyActions';
 import { PROXY_CONFIRM, ProxyConfirmKind } from './proxyConfirmation';
 
 interface ProxyManagementCardProps {
@@ -16,6 +17,8 @@ interface ProxyManagementCardProps {
   actionsDisabled?: boolean;
   emptyMessage?: string;
 }
+
+const VIEW_CREDENTIALS_MESSAGE = 'These are the current credentials of this proxy.';
 
 export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({
   dongleId,
@@ -29,13 +32,13 @@ export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({
   const [confirm, setConfirm] = useState<ProxyConfirmKind | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [confirmError, setConfirmError] = useState<string | null>(null);
-  const [credentials, setCredentials] = useState<{ username: string; password: string } | null>(null);
+  const [credentials, setCredentials] = useState<{ username: string; password: string; message?: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const applyCredentials = (result: unknown) => {
+  const applyCredentials = (result: unknown, message?: string) => {
     const pw = result as ProxyWithPassword | undefined;
     if (pw && pw.password != null) {
-      setCredentials({ username: pw.proxy.auth_user ?? '', password: pw.password });
+      setCredentials({ username: pw.proxy.auth_user ?? '', password: pw.password, message });
     }
   };
 
@@ -53,6 +56,24 @@ export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({
       }
       applyCredentials(result);
       onChanged();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const viewCredentials = async (proxyId: string) => {
+    setBusy('view-credentials');
+    setError(null);
+    setNotice(null);
+    try {
+      const { proxy: p, password } = await api.proxies.getCredentials(proxyId);
+      if (password == null) {
+        setError('Credentials could not be retrieved.');
+        return;
+      }
+      setCredentials({ username: p.auth_user ?? '', password, message: VIEW_CREDENTIALS_MESSAGE });
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -99,24 +120,27 @@ export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({
           <MetricRow label="State" value={<StateBadge state={proxy.state} />} />
           <MetricRow label="Enabled" value={proxy.enabled ? 'Yes' : 'No'} />
           <MetricRow label="Network IP" value={<span className="mono">{proxy.network_ip ?? '—'}</span>} />
-          <MetricRow label="Auth User" value={<span className="mono">{proxy.auth_user ?? '—'}</span>} />
-          <div className="proxy-actions">
-            <button className="btn" disabled={disabled} onClick={() => execute('start', () => api.proxies.start(proxy.id))}>
-              {busy === 'start' ? 'Starting…' : 'Start'}
-            </button>
-            <button className="btn" disabled={disabled} onClick={() => execute('stop', () => api.proxies.stop(proxy.id))}>
-              {busy === 'stop' ? 'Stopping…' : 'Stop'}
-            </button>
-            <button className="btn" disabled={disabled} onClick={() => execute('restart', () => api.proxies.restart(proxy.id))}>
-              {busy === 'restart' ? 'Restarting…' : 'Restart'}
-            </button>
-            <button className="btn" disabled={disabled} onClick={() => openConfirm('rotate')}>
-              Regenerate credentials
-            </button>
-            <button className="btn btn-danger-text" disabled={disabled} onClick={() => openConfirm('delete')}>
-              Delete
-            </button>
-          </div>
+          <MetricRow
+            label="Auth User"
+            value={
+              <span
+                className="mono"
+                title="Proxy authentication username — the password is available via the “View credentials” button."
+              >
+                {proxy.auth_user ?? '—'}
+              </span>
+            }
+          />
+          <ProxyActions
+            busy={busy}
+            disabled={disabled}
+            onStart={() => execute('start', () => api.proxies.start(proxy.id))}
+            onStop={() => execute('stop', () => api.proxies.stop(proxy.id))}
+            onRestart={() => execute('restart', () => api.proxies.restart(proxy.id))}
+            onViewCredentials={() => viewCredentials(proxy.id)}
+            onRotate={() => openConfirm('rotate')}
+            onDelete={() => openConfirm('delete')}
+          />
         </>
       ) : (
         <div className="proxy-empty">
@@ -148,6 +172,7 @@ export const ProxyManagementCard: React.FC<ProxyManagementCardProps> = ({
         open={credentials !== null}
         username={credentials?.username ?? ''}
         password={credentials?.password ?? ''}
+        message={credentials?.message}
         onClose={() => setCredentials(null)}
       />
     </div>

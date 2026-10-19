@@ -6,13 +6,23 @@ interface CredentialsDialogProps {
   open: boolean;
   username: string;
   password: string;
+  message?: string;
   onClose: () => void;
 }
+
+const DEFAULT_MESSAGE =
+  'These are the credentials of this proxy. You can view them again at any time from the proxy card.';
 
 const copyLabel = (status: CopyStatus, base: string) =>
   status === 'copied' ? 'Copied' : status === 'failed' ? 'Failed' : base;
 
-export const CredentialsDialog: React.FC<CredentialsDialogProps> = ({ open, username, password, onClose }) => {
+export const CredentialsDialog: React.FC<CredentialsDialogProps> = ({
+  open,
+  username,
+  password,
+  message,
+  onClose,
+}) => {
   const { status: userStatus, copy: copyUser, reset: resetUser } = useCopyToClipboard();
   const { status: passStatus, copy: copyPass, reset: resetPass } = useCopyToClipboard();
   const { status: bothStatus, copy: copyBoth, reset: resetBoth } = useCopyToClipboard();
@@ -46,9 +56,7 @@ export const CredentialsDialog: React.FC<CredentialsDialogProps> = ({ open, user
         onMouseDown={e => e.stopPropagation()}
       >
         <h2 id="credentials-dialog-title" className="dialog-title">Proxy credentials</h2>
-        <p className="dialog-message">
-          Store these credentials now. The password is shown only this once and will not be available again.
-        </p>
+        <p className="dialog-message">{message ?? DEFAULT_MESSAGE}</p>
         <div className="credentials">
           <div className="credentials-row">
             <span className="metric-label">Username</span>

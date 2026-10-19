@@ -819,10 +819,42 @@ new one instead.
 ```
 
 - Issues a new `auth_user` together with a new password.
-- The password is shown **once, in this response only**: only its hash is
-  persisted, never the plaintext — no endpoint can return it again.
+- The password is encrypted at rest (Fernet) so it can be retrieved again —
+  see *Retrieve Proxy Credentials* below. Rotation still generates a fresh
+  pair and invalidates the previous one.
 - Existing clients are disconnected and must be updated with the new
   credentials.
+
+#### Retrieve Proxy Credentials
+
+**GET** `/api/v1/proxies/{proxy_id}/credentials`
+
+Returns the proxy's current `auth_user` and password, decrypted at rest.
+Protected by the same Basic Auth as every other endpoint, and audited
+(server-side) as an admin action.
+
+**Response**
+```json
+{
+  "proxy": {
+    "id": "123e4567-e89b-12d3-a456-426614174000",
+    "auth_user": "khmtpznwqrbv",
+    "state": "RUNNING"
+  },
+  "password": "stored-proxy-password"
+}
+```
+
+- Response headers are `Cache-Control: no-store` and `Pragma: no-cache`: the
+  body must never be cached.
+- Returns `404 Not Found` when the proxy is unknown.
+- Returns `409 Conflict` when the proxy exists but its password cannot be
+  retrieved — i.e. it predates encrypted storage (or the value is unreadable,
+  e.g. a rotated/deleted key). The `detail` carries a clean business message
+  such as `identifiants non récupérables : proxy antérieur au stockage
+  chiffré, régénérer les identifiants`; call *Rotate Proxy Credentials* to
+  obtain new, retrievable credentials.
+- The plaintext password is never written to any log.
 
 ### Settings
 

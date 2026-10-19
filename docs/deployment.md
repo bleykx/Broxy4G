@@ -589,6 +589,7 @@ docker buildx build --platform linux/arm64 -t broxy4g:local .
 | BROXY4G_API_PASSWORD | Basic auth password for the API (mandatory, empty value is a startup error) | none (required) |
 | BROXY4G_DB_PATH | Database file path | /var/lib/broxy4g/broxy4g.db |
 | BROXY4G_DATA_DIR | Base directory for per-proxy config files | `<dir of BROXY4G_DB_PATH>/proxies` |
+| BROXY4G_PROXY_KEY | Optional Fernet key (base64 urlsafe) used to encrypt proxy passwords at rest, so they can be retrieved through the authenticated API. If unset, a key is generated once and persisted at mode `0600` in the data directory next to the database; that key must be backed up with the volume. See the security note below | none (auto-generated) |
 | BROXY4G_FRONTEND_DIST | Path of the built frontend to serve | /opt/broxy4g/frontend/dist (Docker) |
 | BROXY4G_PROXY_HOST_IPS | Comma-separated host IPs to route through proxies | none |
 | BROXY4G_HOST | Host to bind to | 0.0.0.0 |
@@ -614,6 +615,31 @@ docker buildx build --platform linux/arm64 -t broxy4g:local .
   it at mode `0600` and never commit it (it is gitignored, and the Dockerfile
   copies only explicit paths, so it is never baked into the image)
 - API endpoints should not be exposed to untrusted networks
+
+### Proxy credential storage
+
+Proxy passwords are no longer stored as a one-way hash only: each password is
+also kept **encrypted at rest** (Fernet) so an authenticated user can retrieve
+the current credentials through `GET /api/v1/proxies/{id}/credentials`. The
+retrieval is protected by the same Basic Auth and is audited server-side.
+
+- Encryption key: `BROXY4G_PROXY_KEY` (a Fernet key, base64 urlsafe) if set.
+  When it is **not** set, Broxy4G generates a key once and writes it to
+  `<dir of BROXY4G_DB_PATH>/broxy4g-proxy.key` at mode `0600`, next to the
+  database (same persistent volume), and reuses it across restarts.
+- Honest security posture: encrypting at rest protects a leak of the **database
+  file alone** (an attacker who copies only `broxy4g.db` cannot read the
+  passwords without the key). It does **not** protect a leak of the **whole
+  data volume**: the generated key file sits in the same directory as the
+  database, so whoever can read the volume can also read the key and decrypt
+  everything. A volume backup is therefore a backup of the secrets too — store
+  it with the same care.
+- For stronger isolation, set `BROXY4G_PROXY_KEY` explicitly (outside the data
+  volume, e.g. a secrets manager) and remove/never back up the generated key
+  file, so the database alone never grants access to the plaintext.
+- Rotation: a proxy that predates encrypted storage (or whose value became
+  unreadable after a key rotation) is not retrievable; `GET …/credentials`
+  returns `409` and the credentials must be rotated.
 
 ### Capabilities and Permissions
 

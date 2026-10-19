@@ -22,7 +22,7 @@ def files(tmp_path):
 
 
 @pytest.fixture
-def provisioning(proxy_repo, dongle_repo, allowed_host_repo, fake_docker_compose, port_allocator, files):
+def provisioning(proxy_repo, dongle_repo, allowed_host_repo, fake_docker_compose, port_allocator, files, secret_box):
     return ProxyProvisioningService(
         proxy_repo,
         dongle_repo,
@@ -31,6 +31,7 @@ def provisioning(proxy_repo, dongle_repo, allowed_host_repo, fake_docker_compose
         port_allocator,
         files,
         host_sources=HOST_SOURCES,
+        secret_box=secret_box,
     )
 
 
@@ -154,6 +155,20 @@ async def test_provision_disabled_does_not_start(provisioning, dongle_repo, fake
     assert files.paths.config_path(result.proxy.id).exists()
 
 
+async def test_provision_persists_encrypted_password(
+    provisioning, dongle_repo, proxy_repo, secret_box
+):
+    dongle = await _enroll(dongle_repo)
+    result = await provisioning.provision_dongle(dongle.id)
+
+    assert result.credentials is not None
+    stored = await proxy_repo.get_by_id(result.proxy.id)
+    assert stored.password_encrypted is not None
+    assert secret_box.decrypt(stored.password_encrypted) == result.credentials.password
+    # Le clair n'apparaît jamais dans la colonne de hash.
+    assert result.credentials.password not in (stored.password_hash or "")
+
+
 async def test_provision_local_uses_interface(provisioning, proxy_repo):
     result = await provisioning.provision_local("eth1")
 
@@ -211,6 +226,46 @@ async def test_reprovision_missing_hash_self_heals(provisioning, dongle_repo, pr
     assert _up_calls(fake_docker_compose) == up_before + 1  # un seul `up`
     stored = await proxy_repo.get_by_id(proxy.id)
     assert stored.password_hash == repaired.password_hash
+
+
+async def test_reprovision_missing_hash_encrypts_with_box(
+    provisioning, dongle_repo, proxy_repo, secret_box
+):
+    """Réparation avec coffre opérant : le clair est chiffré et déchiffrable."""
+    proxy = await _null_hash_proxy(provisioning, dongle_repo, proxy_repo)
+
+    repaired = await provisioning.reprovision(proxy.id)
+
+    stored = await proxy_repo.get_by_id(proxy.id)
+    assert stored.password_encrypted is not None
+    assert secret_box.decrypt(stored.password_encrypted) is not None
+    assert stored.password_encrypted == repaired.password_encrypted
+
+
+async def test_reprovision_missing_hash_no_box_stays_null(
+    proxy_repo, dongle_repo, allowed_host_repo, fake_docker_compose, port_allocator, files
+):
+    """Réparation SANS coffre : password_encrypted reste None (comportement d'avant)."""
+    provisioning = ProxyProvisioningService(
+        proxy_repo,
+        dongle_repo,
+        allowed_host_repo,
+        fake_docker_compose,
+        port_allocator,
+        files,
+        host_sources=HOST_SOURCES,
+    )
+    dongle = await _enroll(dongle_repo)
+    result = await provisioning.provision_dongle(dongle.id)
+    stored = await proxy_repo.get_by_id(result.proxy.id)
+    stored.password_hash = None
+    await proxy_repo.save(stored)
+
+    await provisioning.reprovision(stored.id)
+
+    again = await proxy_repo.get_by_id(stored.id)
+    assert again.password_hash
+    assert again.password_encrypted is None
 
 
 async def test_reprovision_missing_hash_is_idempotent(provisioning, dongle_repo, proxy_repo):

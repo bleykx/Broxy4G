@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -5,7 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from broxy4g.api.deps import get_proxy_service, require_auth
 from broxy4g.api.schemas.proxy import ProxyDetail, ProxyOptions, ProxyWithPassword
 from broxy4g.domain.proxy import Proxy
-from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
+from broxy4g.services.proxy_lifecycle import CredentialsUnavailable, ProxyLifecycleService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(require_auth)])
 
@@ -93,6 +96,26 @@ async def rotate_proxy(proxy_id: UUID, svc: ProxyLifecycleService = Depends(get_
     await _load(svc, proxy_id)
     credentials = await svc.rotate_credentials(proxy_id)
     proxy = await _load(svc, proxy_id)
+    return ProxyWithPassword(proxy=_detail(proxy), password=credentials.password)
+
+
+@router.get("/proxies/{proxy_id}/credentials", response_model=ProxyWithPassword)
+async def get_proxy_credentials(
+    proxy_id: UUID,
+    response: Response,
+    svc: ProxyLifecycleService = Depends(get_proxy_service),
+):
+    proxy = await _load(svc, proxy_id)  # 404 si proxy inconnu
+    try:
+        credentials = await svc.get_credentials(proxy_id)
+    except CredentialsUnavailable as exc:
+        # Le proxy existe mais son secret n'est pas récupérable : 409 (conflit
+        # entre la demande et l'état réel) plutôt que 404 (réservé à l'inconnu).
+        logger.warning("Consulte identifiants proxy %s : non récupérables (%s)", proxy_id, exc)
+        raise HTTPException(status_code=409, detail=str(exc))
+    logger.warning("ACTION ADMIN : consultation des identifiants du proxy %s", proxy_id)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
     return ProxyWithPassword(proxy=_detail(proxy), password=credentials.password)
 
 

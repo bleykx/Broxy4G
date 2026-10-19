@@ -97,3 +97,65 @@ async def test_proxy_operations_require_auth(client, auth_headers):
     dongle_id = await _enroll(client, auth_headers, imei="999999999999999")
     response = await client.get(f"/api/v1/dongles/{dongle_id}/proxy")
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_get_credentials_requires_auth(client, auth_headers):
+    dongle_id = await _enroll(client, auth_headers)
+    proxy_id = (
+        await client.get(f"/api/v1/dongles/{dongle_id}/proxy", headers=auth_headers)
+    ).json()["id"]
+    response = await client.get(f"/api/v1/proxies/{proxy_id}/credentials")
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_get_credentials_unknown_proxy_404(client, auth_headers):
+    from uuid import uuid4
+
+    response = await client.get(
+        f"/api/v1/proxies/{uuid4()}/credentials", headers=auth_headers
+    )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_credentials_returns_password_with_no_store(client, auth_headers, caplog):
+    dongle_id = await _enroll(client, auth_headers)
+    proxy = (
+        await client.get(f"/api/v1/dongles/{dongle_id}/proxy", headers=auth_headers)
+    ).json()
+
+    response = await client.get(
+        f"/api/v1/proxies/{proxy['id']}/credentials", headers=auth_headers
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["proxy"]["auth_user"] == proxy["auth_user"]
+    assert body["password"]
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Pragma"] == "no-cache"
+    # Le mot de passe clair ne doit apparaître dans AUCUN log.
+    assert body["password"] not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_get_credentials_legacy_row_409(client, auth_headers, app):
+    """Ligne antérieure au stockage chiffré → 409 avec message métier propre."""
+    from uuid import UUID
+
+    dongle_id = await _enroll(client, auth_headers)
+    proxy_id = (
+        await client.get(f"/api/v1/dongles/{dongle_id}/proxy", headers=auth_headers)
+    ).json()["id"]
+    # Efface le secret chiffré pour simuler une ligne legacy.
+    proxy_repo = app.state.proxy_repo
+    stored = await proxy_repo.get_by_id(UUID(proxy_id))
+    stored.password_encrypted = None
+    await proxy_repo.save(stored)
+
+    response = await client.get(
+        f"/api/v1/proxies/{proxy_id}/credentials", headers=auth_headers
+    )
+    assert response.status_code == 409
+    assert "régénérer" in response.json()["detail"]

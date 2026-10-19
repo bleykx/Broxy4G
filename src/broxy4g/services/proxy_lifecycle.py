@@ -17,8 +17,13 @@ from broxy4g.services.proxy_provisioning import (
     ProvisionedProxy,
     ProxyProvisioningService,
 )
+from broxy4g.services.proxy_secret_box import ProxySecretBox
 
 logger = logging.getLogger(__name__)
+
+
+class CredentialsUnavailable(Exception):
+    """L'identifiant chiffré est absent ou illisible : rotation nécessaire."""
 
 
 class ProxyLifecycleService:
@@ -28,11 +33,13 @@ class ProxyLifecycleService:
         provisioning: ProxyProvisioningService,
         isolation: NetworkIsolationService | None = None,
         routing: RoutingAdapter | None = None,
+        secret_box: ProxySecretBox | None = None,
     ):
         self.proxy_repo = proxy_repo
         self.provisioning = provisioning
         self.isolation = isolation
         self.routing = routing
+        self.secret_box = secret_box
 
     async def _apply_isolation(self) -> None:
         if self.isolation is not None:
@@ -96,11 +103,17 @@ class ProxyLifecycleService:
         await self._apply_isolation()
         return proxy
 
+    def _encrypt_secret(self, password: str) -> str | None:
+        if self.secret_box is None:
+            return None
+        return self.secret_box.encrypt(password)
+
     async def rotate_credentials(self, proxy_id: UUID) -> ProxyCredentials:
         proxy = await self._load(proxy_id)
         credentials = generate_credentials()
         proxy.auth_user = credentials.username
         proxy.password_hash = credentials.password_hash
+        proxy.password_encrypted = self._encrypt_secret(credentials.password)
         await self.provisioning.materialize(proxy)
         proxy.touch()
         await self.proxy_repo.save(proxy)
@@ -149,6 +162,26 @@ class ProxyLifecycleService:
         await self.routing.add_barrier_route(proxy.route_table_id)
 
     # --- lecture -----------------------------------------------------------
+
+    async def get_credentials(self, proxy_id: UUID) -> ProxyCredentials:
+        """Identifiants d'un proxy en déchiffrant le secret persisté au repos.
+
+        Lève ``ValueError`` si le proxy est inconnu et ``CredentialsUnavailable``
+        si le mot de passe n'est pas récupérable (ligne antérieure au stockage
+        chiffré, ou valeur corrompue/clé rotée) : l'utilisateur doit tourner.
+        """
+        proxy = await self._load(proxy_id)
+        password = self.secret_box.decrypt(proxy.password_encrypted) if self.secret_box else None
+        if not proxy.auth_user or password is None:
+            raise CredentialsUnavailable(
+                "identifiants non récupérables : proxy antérieur au stockage "
+                "chiffré, régénérer les identifiants"
+            )
+        return ProxyCredentials(
+            username=proxy.auth_user,
+            password=password,
+            password_hash=proxy.password_hash or "",
+        )
 
     async def get(self, proxy_id: UUID) -> Proxy | None:
         return await self.proxy_repo.get_by_id(proxy_id)

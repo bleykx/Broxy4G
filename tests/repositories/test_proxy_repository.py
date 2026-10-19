@@ -148,6 +148,51 @@ async def test_proxy_repository_used_ports(proxy_repo):
 
 
 @pytest.mark.asyncio
+async def test_proxy_repository_persists_encrypted(proxy_repo):
+    proxy = Proxy(
+        dongle_id=uuid4(),
+        container_name="p",
+        listen_port=31260,
+        auth_user="khmtpznwqrbv",
+        password_hash="$1$salt$hash",
+        password_encrypted="fernet-token-value",
+    )
+    saved = await proxy_repo.save(proxy)
+    retrieved = await proxy_repo.get_by_id(saved.id)
+    assert retrieved.password_encrypted == "fernet-token-value"
+
+    # Mise à jour via _apply_to_orm (changement du secret chiffré).
+    retrieved.password_encrypted = "new-fernet-token"
+    await proxy_repo.save(retrieved)
+    again = await proxy_repo.get_by_id(saved.id)
+    assert again.password_encrypted == "new-fernet-token"
+
+
+def test_migration_adds_password_encrypted_column(tmp_path):
+    """Base préexistante sans la colonne → init_db l'ajoute (idempotent)."""
+    from sqlalchemy import create_engine, inspect, text
+
+    from broxy4g.repositories.database import init_db
+
+    db = tmp_path / "legacy.db"
+    engine = create_engine(f"sqlite:///{db}")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE TABLE proxies ("
+                "id VARCHAR PRIMARY KEY, dongle_id VARCHAR, container_name VARCHAR,"
+                " listen_port INTEGER, state VARCHAR, auth_user VARCHAR,"
+                " password_hash VARCHAR, source_type VARCHAR, source_ref VARCHAR"
+                ")"
+            )
+        )
+    init_db(engine)  # 1er appel : ajoute password_encrypted
+    init_db(engine)  # 2e appel : idempotent
+    cols = {c["name"] for c in inspect(engine).get_columns("proxies")}
+    assert "password_encrypted" in cols
+
+
+@pytest.mark.asyncio
 async def test_proxy_repository_listen_port_unique(proxy_repo):
     await proxy_repo.save(Proxy(dongle_id=None, container_name="a", listen_port=31250))
     other = Proxy(dongle_id=None, container_name="b", listen_port=31250)

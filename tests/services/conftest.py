@@ -25,6 +25,7 @@ from broxy4g.services.proxy_health import ProxyHealthService
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
 from broxy4g.services.proxy_ports import PortAllocator
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
+from broxy4g.services.proxy_secret_box import ProxySecretBox
 from broxy4g.services.reset import ResetService
 from broxy4g.services.routing_allocator import RoutingAllocator
 from broxy4g.services.routing_slot_migration import RoutingSlotMigration
@@ -177,8 +178,14 @@ def proxy_files(tmp_path):
 
 
 @pytest.fixture
+def secret_box(tmp_path):
+    return ProxySecretBox(key_path=tmp_path / "proxy.key")
+
+
+@pytest.fixture
 def provisioning(
-    proxy_repo, dongle_repo, allowed_host_repo, fake_docker_compose, port_allocator, proxy_files
+    proxy_repo, dongle_repo, allowed_host_repo, fake_docker_compose, port_allocator,
+    proxy_files, secret_box,
 ):
     return ProxyProvisioningService(
         proxy_repo,
@@ -187,13 +194,15 @@ def provisioning(
         fake_docker_compose,
         port_allocator,
         proxy_files,
+        secret_box=secret_box,
     )
 
 
 @pytest.fixture
-def proxy_service(proxy_repo, provisioning, isolation, fake_routing):
+def proxy_service(proxy_repo, provisioning, isolation, fake_routing, secret_box):
     return ProxyLifecycleService(
-        proxy_repo, provisioning, isolation=isolation, routing=fake_routing
+        proxy_repo, provisioning, isolation=isolation, routing=fake_routing,
+        secret_box=secret_box,
     )
 
 

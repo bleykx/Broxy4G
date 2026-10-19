@@ -1,9 +1,9 @@
 import base64
-import os
 
 import httpx
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 
 from broxy4g.api.app import create_app
 from broxy4g.repositories.database import create_engine, create_session_factory, init_db
@@ -12,9 +12,11 @@ from broxy4g.repositories.proxy_repository import ProxyRepository
 
 
 @pytest.fixture
-def app():
-    os.environ["BROXY4G_API_USER"] = "admin"
-    os.environ["BROXY4G_API_PASSWORD"] = "test-pass"
+def app(monkeypatch):
+    monkeypatch.setenv("BROXY4G_API_USER", "admin")
+    monkeypatch.setenv("BROXY4G_API_PASSWORD", "test-pass")
+    # Clé Fernet connue : permet la consultation des identifiants en test.
+    monkeypatch.setenv("BROXY4G_PROXY_KEY", Fernet.generate_key().decode())
     engine = create_engine("sqlite:///:memory:")
     init_db(engine)
     sf = create_session_factory(engine)

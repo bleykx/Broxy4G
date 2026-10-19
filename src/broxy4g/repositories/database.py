@@ -61,6 +61,7 @@ class ProxyORM(Base):
     state: str = Column(String)
     auth_user: str | None = Column(String)
     password_hash: str | None = Column(String)
+    password_encrypted: str | None = Column(String)
     created_at: datetime = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: datetime = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     source_type: str = Column(String, default="dongle")
@@ -110,6 +111,7 @@ def create_session_factory(engine):
 
 _PROXY_MIGRATED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("password_hash", "VARCHAR"),
+    ("password_encrypted", "VARCHAR"),
     ("source_type", "VARCHAR DEFAULT 'dongle'"),
     ("source_ref", "VARCHAR"),
     ("interface_name", "VARCHAR"),

@@ -118,6 +118,8 @@ export const api = {
       request<void>(`/proxies/${proxyId}/restart`, { method: 'POST' }),
     rotate: (proxyId: string) => 
       request<ProxyWithPassword>(`/proxies/${proxyId}/rotate`, { method: 'POST' }),
+    getCredentials: (proxyId: string) => 
+      request<ProxyWithPassword>(`/proxies/${proxyId}/credentials`),
     delete: (proxyId: string) => 
       request<void>(`/proxies/${proxyId}`, { method: 'DELETE' }),
   },

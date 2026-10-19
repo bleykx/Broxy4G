@@ -26,6 +26,7 @@ from broxy4g.env_config import resolve_adb_path, resolve_usb_recovery_cooldown  
 from broxy4g.repositories.database import create_engine, create_session_factory, init_db
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
+from broxy4g.services.proxy_secret_box import KEY_FILENAME
 from broxy4g.workers.runner import run_workers
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,9 @@ async def main():
         nm=RealNetworkManager(RealShell()),
         reset_lock=ResetLock(),
         data_dir=os.environ.get("BROXY4G_DATA_DIR", str(db_path.parent / "proxies")),
+        # Clé du coffre de secret : à côté de la base (même volume persistant),
+        # stable entre redémarrages, fichier 0600.
+        proxy_secret_key_path=db_path.parent / KEY_FILENAME,
     )
 
     # Serve frontend for non-API routes

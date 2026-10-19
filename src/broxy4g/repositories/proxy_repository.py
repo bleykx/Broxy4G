@@ -20,6 +20,7 @@ class ProxyRepository:
             state=proxy.state.value,
             auth_user=proxy.auth_user,
             password_hash=proxy.password_hash,
+            password_encrypted=proxy.password_encrypted,
             created_at=proxy.created_at,
             updated_at=proxy.updated_at,
             source_type=proxy.source_type.value,
@@ -42,6 +43,7 @@ class ProxyRepository:
             state=ProxyState(orm.state),
             auth_user=orm.auth_user,
             password_hash=orm.password_hash,
+            password_encrypted=orm.password_encrypted,
             created_at=orm.created_at,
             updated_at=orm.updated_at,
             source_type=ProxySource(orm.source_type or "dongle"),
@@ -62,6 +64,7 @@ class ProxyRepository:
         orm.state = proxy.state.value
         orm.auth_user = proxy.auth_user
         orm.password_hash = proxy.password_hash
+        orm.password_encrypted = proxy.password_encrypted
         orm.updated_at = proxy.updated_at
         orm.source_type = proxy.source_type.value
         orm.source_ref = proxy.source_ref

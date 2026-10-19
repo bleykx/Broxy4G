@@ -28,6 +28,7 @@ from broxy4g.services.proxy_network import ProxyNetworkService
 from broxy4g.services.proxy_port_reservations import ProxyPortReservations
 from broxy4g.services.proxy_ports import PortAllocator
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
+from broxy4g.services.proxy_secret_box import ProxySecretBox
 from broxy4g.services.reset import ResetService
 from broxy4g.services.reset_throttle import ResetThrottle
 from broxy4g.services.routing_allocator import RoutingAllocator
@@ -121,6 +122,10 @@ def build_service_graph(app: FastAPI, data_dir: str | None) -> None:
     app.state.proxy_health_service = ProxyHealthService(
         app.state.proxy_repo, app.state.docker_compose, app.state.proxy_listen_service
     )
+    # Coffre de secret : clé issue de l'env (BROXY4G_PROXY_KEY), sinon fichier
+    # 0600 du répertoire de la base (stable entre redémarrages). Fail-closed
+    # si indisponible.
+    app.state.proxy_secret_box = ProxySecretBox(key_path=app.state.proxy_secret_key_path)
     app.state.provisioning = ProxyProvisioningService(
         app.state.proxy_repo,
         app.state.dongle_repo,
@@ -130,12 +135,14 @@ def build_service_graph(app: FastAPI, data_dir: str | None) -> None:
         files,
         listen=app.state.proxy_listen_service,
         network=app.state.proxy_network,
+        secret_box=app.state.proxy_secret_box,
     )
     app.state.proxy_service = ProxyLifecycleService(
         app.state.proxy_repo,
         app.state.provisioning,
         isolation=app.state.isolation,
         routing=app.state.routing,
+        secret_box=app.state.proxy_secret_box,
     )
     # Après création du service de cycle de vie : le service d'écoute peut le
     # rappeler (reapply_all_enabled) quand l'interface d'écoute change.
