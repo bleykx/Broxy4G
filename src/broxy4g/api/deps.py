@@ -8,6 +8,7 @@ from broxy4g.services.discovery import DiscoveryService
 from broxy4g.services.enrollment import EnrollmentService
 from broxy4g.services.local_connections import LocalConnectionsService
 from broxy4g.services.metrics_snapshot import MetricsSnapshot
+from broxy4g.services.pool_service import PoolService
 from broxy4g.services.proxy_health import ProxyHealthService
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
 from broxy4g.services.proxy_listen import ProxyListenService
@@ -56,6 +57,10 @@ def get_metrics_snapshot(request: Request) -> MetricsSnapshot:
 
 def get_proxy_health_service(request: Request) -> ProxyHealthService:
     return request.app.state.proxy_health_service
+
+
+def get_pool_service(request: Request) -> PoolService:
+    return request.app.state.pool_service
 
 
 def require_auth(request: Request, _auth: None = Depends(verify_basic_auth)) -> None:

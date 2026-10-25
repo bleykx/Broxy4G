@@ -892,6 +892,198 @@ Protected by the same Basic Auth as every other endpoint, and audited
   obtain new, retrievable credentials.
 - The plaintext password is never written to any log.
 
+### Proxy Pools
+
+A pool groups several existing proxies behind a **single port**: a client
+connects to the pool's port and is served by one eligible member of the pool.
+Every pool route requires the same Basic Auth as the rest of the API. The
+pool's plaintext password is only returned at creation
+(`POST /api/v1/pools`) and on the explicit credentials retrieval
+(`GET /api/v1/pools/{pool_id}/credentials`) — never by any other route.
+
+| Method | Route | Role |
+| --- | --- | --- |
+| GET | `/api/v1/pools` | list pools (members, listening) |
+| POST | `/api/v1/pools` | create (returns the password once) |
+| GET | `/api/v1/pools/{pool_id}` | detail |
+| PATCH | `/api/v1/pools/{pool_id}` | `label`, `enabled` |
+| DELETE | `/api/v1/pools/{pool_id}` | delete |
+| POST | `/api/v1/pools/{pool_id}/members` | add a member (`proxy_id`) |
+| DELETE | `/api/v1/pools/{pool_id}/members/{proxy_id}` | remove a member |
+| GET | `/api/v1/pools/{pool_id}/status` | contractual alias of `GET /api/v1/pools/{pool_id}` (same aggregate) |
+| GET | `/api/v1/pools/{pool_id}/credentials` | pool credentials (`no-store`, logged) |
+
+All pool responses except the credentials route carry the `PoolDetail` object:
+
+```json
+{
+  "id": "…", "label": "Prod", "listen_port": 31301, "auth_user": "khmtpznwqrbv",
+  "enabled": true, "created_at": "…", "updated_at": "…",
+  "listening": true, "bind_ip": "192.168.1.10", "listen_error": null,
+  "published_ip": "192.168.1.10", "endpoint": "192.168.1.10:31301",
+  "members": [{"proxy_id": "…", "eligible": true, "reason": null, "target": "172.28.0.5:3128"}],
+  "eligible_count": 1
+}
+```
+
+- `endpoint` is the `ip:port` to communicate to clients (`null` when the port
+  is not published, e.g. the listen interface is absent — the error then shows
+  in `listen_error`).
+- `target` is the member's **internal** address on the proxy bridge
+  (`172.28.0.x:3128`, never the published port); `null` when the member is not
+  eligible. `reason` explains an ineligibility refusal
+  (`proxy non démarré (state=STOPPED)`, `dongle en reset`, …) and is `null`
+  when the member is eligible.
+- `password_encrypted` and the members' credentials are **never** exposed by
+  any pool route.
+
+#### List Pools
+
+**GET** `/api/v1/pools`
+
+Returns a list of all pools as `PoolDetail` objects (members evaluated,
+listening state, endpoint).
+
+#### Create Pool
+
+**POST** `/api/v1/pools`
+
+Creates a pool: a port in the dedicated `31301-31399` range is allocated and a
+pool credential pair is generated.
+
+**Request**
+```json
+{
+  "label": "Prod"
+}
+```
+
+- `label` is required; an empty or whitespace-only label returns
+  `422 Unprocessable Entity`.
+
+**Response** — `201 Created`
+```json
+{
+  "pool": {
+    "id": "…", "label": "Prod", "listen_port": 31301, "auth_user": "khmtpznwqrbv",
+    "enabled": true, "created_at": "…", "updated_at": "…",
+    "listening": true, "bind_ip": "192.168.1.10", "listen_error": null,
+    "published_ip": "192.168.1.10", "endpoint": "192.168.1.10:31301",
+    "members": [], "eligible_count": 0
+  },
+  "password": "<plaintext password, returned only once>"
+}
+```
+
+- The plaintext password is returned **only once**, in this response (or on an
+  explicit `GET …/credentials`): it is never logged.
+- Returns `409 Conflict` when the pool port range is exhausted, or when the
+  pool password cannot be encrypted (secret box unavailable — fail-closed: no
+  pool row is written).
+
+#### Get Pool Detail
+
+**GET** `/api/v1/pools/{pool_id}`
+
+Returns the pool's `PoolDetail`. Returns `404 Not Found` when the pool is
+unknown.
+
+#### Update Pool
+
+**PATCH** `/api/v1/pools/{pool_id}`
+
+Updates `label` and/or `enabled`; both fields are optional and only the
+provided ones are changed.
+
+**Request**
+```json
+{
+  "label": "Prod",
+  "enabled": true
+}
+```
+
+- A provided `label` must be non-empty after trimming, otherwise
+  `422 Unprocessable Entity`.
+- **Response**: the updated pool's `PoolDetail`.
+
+#### Delete Pool
+
+**DELETE** `/api/v1/pools/{pool_id}`
+
+Stops the pool's listening, removes its members, then deletes the pool.
+
+**Response**
+
+`204 No Content` (no body).
+
+Returns `404 Not Found` when the pool is unknown.
+
+#### Add Pool Member
+
+**POST** `/api/v1/pools/{pool_id}/members`
+
+Adds an existing proxy to the pool.
+
+**Request**
+```json
+{
+  "proxy_id": "123e4567-e89b-12d3-a456-426614174000"
+}
+```
+
+- Returns `201 Created` when the proxy is added, `200 OK` when it was already
+  a member (idempotent).
+- **Response**: the pool's `PoolDetail` (the new member appears in `members`).
+- Returns `404 Not Found` when the pool or the proxy is unknown.
+
+#### Remove Pool Member
+
+**DELETE** `/api/v1/pools/{pool_id}/members/{proxy_id}`
+
+Removes a proxy from the pool.
+
+**Response**: the pool's `PoolDetail`.
+
+- Returns `404 Not Found` when the pool is unknown.
+
+#### Get Pool Status
+
+**GET** `/api/v1/pools/{pool_id}/status`
+
+Contractual alias of `GET /api/v1/pools/{pool_id}`: same `PoolDetail`
+aggregate, with the listening state and member eligibility evaluated live.
+
+#### Get Pool Credentials
+
+**GET** `/api/v1/pools/{pool_id}/credentials`
+
+Returns the pool's current `auth_user` and password (encrypted at rest,
+decrypted on demand). Protected by the same Basic Auth as every other
+endpoint, and audited (server-side) as an admin action.
+
+**Response**
+```json
+{
+  "pool": {
+    "id": "…", "label": "Prod", "listen_port": 31301, "auth_user": "khmtpznwqrbv",
+    "enabled": true, "created_at": "…", "updated_at": "…",
+    "listening": true, "bind_ip": "192.168.1.10", "listen_error": null,
+    "published_ip": "192.168.1.10", "endpoint": "192.168.1.10:31301",
+    "members": [], "eligible_count": 0
+  },
+  "password": "stored-pool-password"
+}
+```
+
+- Response headers are `Cache-Control: no-store` and `Pragma: no-cache`: the
+  body must never be cached.
+- Returns `404 Not Found` when the pool is unknown.
+- Returns `409 Conflict` when the pool exists but its password cannot be
+  decrypted (rotated key, corrupted value).
+- The members' credentials are never exposed by this route: only the pool's
+  own pair.
+
 ### Settings
 
 Global settings, all under `/api/v1/settings`, protected by the same Basic Auth.
@@ -971,7 +1163,7 @@ Sending `null` (or an empty value) resets the setting to the default `0.0.0.0`.
 | 400 | Bad Request |
 | 401 | Unauthorized |
 | 403 | Forbidden |
-| 404 | Not Found |
-| 409 | Conflict (e.g., duplicate enrollment) |
-| 422 | Unprocessable Entity (e.g., incomplete identity, unknown `transport`) |
+| 404 | Not Found (e.g., unknown dongle, unknown pool, unknown pool member proxy) |
+| 409 | Conflict (e.g., duplicate enrollment, pool credentials not retrievable, pool port range exhausted) |
+| 422 | Unprocessable Entity (e.g., incomplete identity, unknown `transport`, empty pool label) |
 | 500 | Internal Server Error |

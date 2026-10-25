@@ -6,6 +6,7 @@ import { EnrollDonglePage } from './pages/EnrollDonglePage';
 import { LocalUplinkPage } from './pages/LocalUplinkPage';
 import { LocalUplinkDetailPage } from './pages/LocalUplinkDetailPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { PoolsPage } from './features/pools/PoolsPage';
 import { LoginOverlay } from './components/LoginOverlay';
 import { api } from './lib/api';
 import './index.css';
@@ -44,6 +45,9 @@ const App: React.FC = () => {
             <NavLink to="/" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
               Dashboard
             </NavLink>
+            <NavLink to="/pools" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
+              Pools
+            </NavLink>
             <NavLink to="/settings" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
               Configuration
             </NavLink>
@@ -53,6 +57,7 @@ const App: React.FC = () => {
         <main className="main-content">
           <Routes>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/pools" element={<PoolsPage />} />
             <Route path="/dongles/new" element={<EnrollDonglePage />} />
             <Route path="/dongles/:id" element={<DongleDetailPage />} />
             <Route path="/local/new" element={<LocalUplinkPage />} />

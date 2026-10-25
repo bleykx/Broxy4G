@@ -96,6 +96,14 @@ async def run_workers(app, stop_event: asyncio.Event, work_dir: str):
                 await reconciliation.reconcile_all()
             except Exception:
                 logger.exception("Reconciliation error")
+            try:
+                await app.state.pool_service.prune_members()
+            except Exception:
+                logger.exception("Pool members prune error")
+            try:
+                await app.state.pool_service.sync_gateway()
+            except Exception:
+                logger.exception("Pool gateway sync error")
             await asyncio.sleep(30)
 
     tasks = [asyncio.create_task(discovery_loop()), asyncio.create_task(reconciliation_loop())]

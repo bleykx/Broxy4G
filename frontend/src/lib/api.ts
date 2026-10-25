@@ -11,7 +11,11 @@ import {
   LocalConnection,
   LocalConnectionView,
   AllowedHost,
-  ProxyListenInterfaceSetting
+  ProxyListenInterfaceSetting,
+  PoolDetail,
+  PoolWithPassword,
+  PoolCreateRequest,
+  PoolUpdateRequest
 } from '../types/api';
 
 const API_BASE = '/api/v1';
@@ -122,6 +126,35 @@ export const api = {
       request<ProxyWithPassword>(`/proxies/${proxyId}/credentials`),
     delete: (proxyId: string) => 
       request<void>(`/proxies/${proxyId}`, { method: 'DELETE' }),
+  },
+  pools: {
+    list: () =>
+      request<PoolDetail[]>('/pools'),
+    get: (poolId: string) =>
+      request<PoolDetail>(`/pools/${poolId}`),
+    create: (data: PoolCreateRequest) =>
+      request<PoolWithPassword>('/pools', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    update: (poolId: string, data: PoolUpdateRequest) =>
+      request<PoolDetail>(`/pools/${poolId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    delete: (poolId: string) =>
+      request<void>(`/pools/${poolId}`, { method: 'DELETE' }),
+    addMember: (poolId: string, proxyId: string) =>
+      request<PoolDetail>(`/pools/${poolId}/members`, {
+        method: 'POST',
+        body: JSON.stringify({ proxy_id: proxyId }),
+      }),
+    removeMember: (poolId: string, proxyId: string) =>
+      request<PoolDetail>(`/pools/${poolId}/members/${proxyId}`, { method: 'DELETE' }),
+    status: (poolId: string) =>
+      request<PoolDetail>(`/pools/${poolId}/status`),
+    getCredentials: (poolId: string) =>
+      request<PoolWithPassword>(`/pools/${poolId}/credentials`),
   },
   allowedHosts: {
     list: () =>

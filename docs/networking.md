@@ -615,6 +615,53 @@ it never changes the egress pinning.
   an error that stops a proxy or crashes reconciliation — it only withholds the
   publication until the interface is back.
 
+## Pools de proxies
+
+Un pool de proxies (cf. `docs/proxy-pools.md`, `docs/architecture.md` →
+*Proxy Pools* et `docs/api.md` → *Proxy Pools*) expose plusieurs proxies
+derrière un port unique. Il n'apporte **aucun** artefact réseau de son propre
+fait :
+
+- **Plage de ports dédiée `31301-31399`** (`POOL_PORT_START` /
+  `POOL_PORT_END`, `domain/proxy_pool.py`), disjointe de la plage des proxies
+  (`31201-31299`) et du port de l'API (`8080`). L'allocation est faite par
+  `PoolPortAllocator` (`services/pool_ports.py`) : elle ignore les ports déjà
+  pris par un pool, par un proxy, ou publiés par Docker dans cette plage. Le
+  port est persisté à la création et **jamais réattribué dynamiquement** : un
+  redémarrage ne change jamais l'URL communiquée aux clients.
+- **Même interface d'écoute que les proxies** : le bind suit
+  `ProxyListenService.resolve_bind_ip` (l'IPv4 de `proxy.listen_interface`,
+  `0.0.0.0` si aucune interface n'est configurée). Interface absente ou sans
+  IPv4 ⇒ le pool n'est **pas exposé** ; l'erreur est remontée dans
+  `listen_error` du statut API (graceful, comme l'ingress des proxies).
+- **Aucune modification nftables** : le gateway de pool tourne **dans le
+  processus API** (réseau hôte, pas de conteneur), et chaque connexion
+  sortante vers un membre cible l'adresse **interne** du membre
+  (`172.28.0.x:3128`, sur le pont `broxy4g-net`). C'est le **proxy membre** —
+  déjà épinglé à son dongle par `ip rule` / marque firewall et couvert par
+  les règles `proxy_mark` / `proxy_nat` / `proxy_filter` — qui porte
+  l'isolation. Le trafic du pool ne crée donc **ni route, ni règle, ni table
+  par dongle** : les règles nftables par proxy restent la seule autorité
+  d'egress.
+- **Un pool ne publie jamais le port LAN d'un proxy** et ne contourne jamais
+  les règles de binding : un client du pool s'authentifie avec les
+  identifiants **du pool** (Basic, en-tête `Proxy-Authorization`), puis le
+  gateway réinjecte les identifiants **du membre** dans la requête envoyée au
+  membre. Les deux couples ne sont jamais confondus, ni exposés l'un par
+  l'autre.
+- **Source autorisée côté membre** : le gateway (processus API, réseau hôte)
+  joint `172.28.0.x:3128` avec l'adresse de la passerelle du pont
+  (`172.28.0.1`). Cette IP fait partie des sources hôte par défaut de
+  `render_3proxy_config` (`DEFAULT_HOST_SOURCES` : `127.0.0.1` +
+  `DOCKER_GATEWAY`), donc l'ACL `allow …/deny *` du membre laisse passer le
+  pool sans réglage supplémentaire. Ne jamais retirer `172.28.0.1` des sources
+  hôte d'un proxy membre.
+- **Sortie de rotation pendant un reset** : quand un dongle entre en reset
+  (`RESETTING` ou verrou de reset tenu), ses proxies sortent immédiatement de
+  la rotation (règle d'éligibilité, ré-évaluée à chaque connexion) **sans
+  couper les tunnels déjà établis** ; la connexion en cours tombe d'elle-même
+  quand le reset ferme le conteneur.
+
 ## Isolation d'un proxy pendant un reset de dongle
 
 Le reset d'un dongle **met le conteneur proxy en pause**

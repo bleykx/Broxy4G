@@ -75,6 +75,29 @@ class ProxyORM(Base):
     fwmark: int | None = Column(Integer)
 
 
+class ProxyPoolORM(Base):
+    __tablename__ = "proxy_pools"
+
+    id: UUID = Column(UUIDType, primary_key=True)
+    label: str = Column(String)
+    listen_port: int = Column(Integer, unique=True)
+    auth_user: str | None = Column(String)
+    password_encrypted: str | None = Column(String)
+    enabled: bool = Column(Boolean, default=True)
+    created_at: datetime = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    updated_at: datetime = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class ProxyPoolMemberORM(Base):
+    __tablename__ = "proxy_pool_members"
+    __table_args__ = (UniqueConstraint("pool_id", "proxy_id", name="ux_proxy_pool_members"),)
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    pool_id: UUID = Column(UUIDType, index=True)
+    proxy_id: UUID = Column(UUIDType, index=True)
+    created_at: datetime = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
 class GlobalAllowedHostORM(Base):
     __tablename__ = "global_allowed_hosts"
 

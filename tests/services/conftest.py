@@ -3,7 +3,7 @@ import pytest
 from broxy4g.adapters.connectivity import FakeConnectivity
 from broxy4g.adapters.docker_compose import FakeDockerCompose
 from broxy4g.adapters.docker_network import FakeDockerNetwork
-from broxy4g.adapters.local_uplink import FakeLocalUplink
+from broxy4g.adapters.local_uplink import FakeLocalUplink, LocalInterface
 from broxy4g.adapters.modem_manager import FakeModemManager
 from broxy4g.adapters.net_interface import FakeInterface
 from broxy4g.adapters.nftables import FakeNftables
@@ -13,6 +13,7 @@ from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.allowed_host_repository import AllowedHostRepository
 from broxy4g.repositories.database import create_engine, create_session_factory, init_db
 from broxy4g.repositories.dongle_repository import DongleRepository
+from broxy4g.repositories.pool_repository import PoolRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
 from broxy4g.repositories.settings_repository import SettingsRepository
 from broxy4g.services.connection import ConnectionService
@@ -23,6 +24,7 @@ from broxy4g.services.network_isolation import NetworkIsolationService
 from broxy4g.services.proxy_files import ProxyFileWriter, ProxyPaths
 from broxy4g.services.proxy_health import ProxyHealthService
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
+from broxy4g.services.proxy_listen import ProxyListenService
 from broxy4g.services.proxy_ports import PortAllocator
 from broxy4g.services.proxy_provisioning import ProxyProvisioningService
 from broxy4g.services.proxy_secret_box import ProxySecretBox
@@ -264,3 +266,15 @@ def reset_service(
 @pytest.fixture
 def port_allocator(proxy_repo):
     return PortAllocator(proxy_repo)
+
+
+@pytest.fixture
+def pool_repo(session_factory):
+    return PoolRepository(session_factory)
+
+
+@pytest.fixture
+def pool_listen(settings_repo, fake_local_uplink):
+    """Service d'écoute résolu sur une IP d'interface connue."""
+    fake_local_uplink.set_interfaces([LocalInterface(name="eth0", ip="192.168.1.10", kind="ethernet")])
+    return ProxyListenService(settings_repo, fake_local_uplink)

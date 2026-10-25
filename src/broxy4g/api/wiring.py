@@ -7,6 +7,7 @@ reçoivent, puis la connexion smartphone, puis la connexion modem.
 """
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -20,6 +21,10 @@ from broxy4g.services.discovery import DiscoveryService
 from broxy4g.services.enrollment import EnrollmentService
 from broxy4g.services.local_connections import LocalConnectionsService
 from broxy4g.services.network_isolation import NetworkIsolationService
+from broxy4g.services.pool_gateway_port import FakePoolGateway, PoolGatewayPort
+from broxy4g.services.pool_membership import PoolMembershipService
+from broxy4g.services.pool_ports import PoolPortAllocator
+from broxy4g.services.pool_service import PoolService
 from broxy4g.services.proxy_files import ProxyFileWriter, ProxyPaths
 from broxy4g.services.proxy_health import ProxyHealthService
 from broxy4g.services.proxy_lifecycle import ProxyLifecycleService
@@ -63,7 +68,14 @@ def _env_float(name: str, default: float) -> float:
     return value if value >= 0 else default
 
 
-def build_service_graph(app: FastAPI, data_dir: str | None) -> None:
+# Fabrique du gateway de pools : main() fournit le vrai gateway asyncio ; à
+# défaut, un faux gateway garantit que les tests d'API ne lient jamais de port.
+PoolGatewayFactory = Callable[[FastAPI], PoolGatewayPort]
+
+
+def build_service_graph(
+    app: FastAPI, data_dir: str | None, pool_gateway_factory: PoolGatewayFactory | None = None
+) -> None:
     """Peuple app.state avec les services, dans l'ordre de dépendance exact."""
     app.state.isolation = NetworkIsolationService(
         app.state.proxy_repo, app.state.dongle_repo, app.state.nft
@@ -185,4 +197,26 @@ def build_service_graph(app: FastAPI, data_dir: str | None) -> None:
         reset_timeout=_env_float("BROXY4G_RESET_TIMEOUT_SECONDS", 300.0),
         done_window=ResetPostDoneWindow(seconds=_env_float("BROXY4G_RESET_POST_DONE_SECONDS", 15.0)),
         lockout=app.state.reset_lockout,
+    )
+    # Pools de proxies : point d'entrée unique par-dessus les proxies existants.
+    # La gateway réelle est injectée par main(); par défaut un faux gateway est
+    # utilisé pour que les tests d'API ne lient jamais de port.
+    app.state.pool_membership = PoolMembershipService(
+        app.state.pool_repo,
+        app.state.proxy_repo,
+        app.state.dongle_repo,
+        app.state.proxy_secret_box,
+        reset_lock=app.state.reset_lock,
+    )
+    app.state.pool_gateway = (
+        pool_gateway_factory(app) if pool_gateway_factory is not None else FakePoolGateway()
+    )
+    app.state.pool_service = PoolService(
+        app.state.pool_repo,
+        app.state.proxy_repo,
+        PoolPortAllocator(app.state.pool_repo, app.state.proxy_repo, app.state.docker_compose),
+        app.state.pool_membership,
+        app.state.proxy_secret_box,
+        app.state.pool_gateway,
+        app.state.proxy_listen_service,
     )

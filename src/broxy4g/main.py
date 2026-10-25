@@ -26,6 +26,7 @@ from broxy4g.env_config import resolve_adb_path, resolve_usb_recovery_cooldown  
 from broxy4g.repositories.database import create_engine, create_session_factory, init_db
 from broxy4g.repositories.dongle_repository import DongleRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
+from broxy4g.services.pool_gateway import AsyncioPoolGateway
 from broxy4g.services.proxy_secret_box import KEY_FILENAME
 from broxy4g.workers.runner import run_workers
 
@@ -109,10 +110,14 @@ async def main():
         # Clé du coffre de secret : à côté de la base (même volume persistant),
         # stable entre redémarrages, fichier 0600.
         proxy_secret_key_path=db_path.parent / KEY_FILENAME,
+        pool_gateway_factory=lambda a: AsyncioPoolGateway(a.state.pool_membership, a.state.proxy_listen_service),
     )
 
     # Serve frontend for non-API routes
     register_frontend(app, resolve_frontend_dist())
+
+    # Boot : réécoute des pools activés (no-op avec le faux gateway de tests).
+    await app.state.pool_service.sync_gateway()
 
     stop_event = asyncio.Event()
     worker_task = asyncio.create_task(run_workers(app, stop_event, work_dir))
@@ -134,6 +139,7 @@ async def main():
     finally:
         stop_event.set()
         await worker_task
+        await app.state.pool_gateway.stop_all()
 
 
 if __name__ == "__main__":

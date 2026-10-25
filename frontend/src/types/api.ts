@@ -137,6 +137,44 @@ export interface ProxyListenInterfaceSetting {
   interface_name: string | null;
 }
 
+export interface PoolMemberStatus {
+  proxy_id: string;
+  eligible: boolean;
+  reason: string | null;
+  target: string | null;
+}
+
+export interface PoolDetail {
+  id: string;
+  label: string;
+  listen_port: number;
+  auth_user: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+  listening: boolean;
+  bind_ip: string | null;
+  listen_error: string | null;
+  published_ip: string | null;
+  endpoint: string | null;
+  members: PoolMemberStatus[];
+  eligible_count: number;
+}
+
+export interface PoolWithPassword {
+  pool: PoolDetail;
+  password: string | null;
+}
+
+export interface PoolCreateRequest {
+  label: string;
+}
+
+export interface PoolUpdateRequest {
+  label?: string;
+  enabled?: boolean;
+}
+
 export type ResetStatus = 'DONE' | 'ERROR' | 'PENDING' | 'LOCK';
 
 export interface ResetResponse {

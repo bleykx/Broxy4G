@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -18,6 +19,7 @@ from broxy4g.api.routers.dongle_reset import router as dongle_reset_router
 from broxy4g.api.routers.dongles import router as dongles_router
 from broxy4g.api.routers.health import router as health_router
 from broxy4g.api.routers.local_connections import router as local_connections_router
+from broxy4g.api.routers.pools import router as pools_router
 from broxy4g.api.routers.proxies import router as proxies_router
 from broxy4g.api.routers.session import router as session_router
 from broxy4g.api.routers.settings import router as settings_router
@@ -27,9 +29,11 @@ from broxy4g.domain.reset_lockout import ResetLockout
 from broxy4g.domain.reset_states import ResetLock
 from broxy4g.repositories.allowed_host_repository import AllowedHostRepository
 from broxy4g.repositories.dongle_repository import DongleRepository
+from broxy4g.repositories.pool_repository import PoolRepository
 from broxy4g.repositories.proxy_repository import ProxyRepository
 from broxy4g.repositories.settings_repository import SettingsRepository
 from broxy4g.services.metrics_snapshot import MetricsSnapshot
+from broxy4g.services.pool_gateway_port import PoolGatewayPort
 
 
 def _resolve_allowed_host_repo(proxy_repo: ProxyRepository | None, repo):
@@ -44,6 +48,13 @@ def _resolve_settings_repo(proxy_repo: ProxyRepository | None, repo):
         return repo
     factory = getattr(proxy_repo, "session_factory", None)
     return SettingsRepository(factory) if factory is not None else None
+
+
+def _resolve_pool_repo(proxy_repo: ProxyRepository | None, repo):
+    if repo is not None:
+        return repo
+    factory = getattr(proxy_repo, "session_factory", None)
+    return PoolRepository(factory) if factory is not None else None
 
 
 def create_app(
@@ -65,6 +76,8 @@ def create_app(
     nm: NetworkManagerAdapter | None = None,
     data_dir: str | None = None,
     proxy_secret_key_path: Path | None = None,
+    pool_repo: PoolRepository | None = None,
+    pool_gateway_factory: Callable[[FastAPI], PoolGatewayPort] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Broxy4G API", version="0.1.0")
 
@@ -78,9 +91,11 @@ def create_app(
 
     allowed_host_repo = _resolve_allowed_host_repo(proxy_repo, allowed_host_repo)
     settings_repo = _resolve_settings_repo(proxy_repo, settings_repo)
+    pool_repo = _resolve_pool_repo(proxy_repo, pool_repo)
 
     app.state.dongle_repo = dongle_repo
     app.state.proxy_repo = proxy_repo
+    app.state.pool_repo = pool_repo
     app.state.allowed_host_repo = allowed_host_repo
     app.state.settings_repo = settings_repo
     app.state.modem = modem or FakeModemManager()
@@ -99,12 +114,13 @@ def create_app(
     app.state.nm = nm or FakeNetworkManager()
     app.state.proxy_secret_key_path = proxy_secret_key_path
 
-    build_service_graph(app, data_dir)
+    build_service_graph(app, data_dir, pool_gateway_factory)
 
     app.include_router(health_router)
     app.include_router(dongles_router, prefix="/api/v1")
     app.include_router(dongle_reset_router, prefix="/api/v1")
     app.include_router(proxies_router, prefix="/api/v1")
+    app.include_router(pools_router, prefix="/api/v1")
     app.include_router(local_connections_router, prefix="/api/v1")
     app.include_router(allowed_hosts_router, prefix="/api/v1")
     app.include_router(session_router, prefix="/api/v1")

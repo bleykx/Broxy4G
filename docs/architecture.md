@@ -319,6 +319,71 @@ compose de chaque proxy le déclarent `external: true`. Un pont existant
 n'est jamais supprimé ni recréé. Détails : `docs/networking.md`
 (« Création et auto-réparation du bridge du réseau proxy »).
 
+### Proxy Pools
+
+Un pool est un **point d'entrée unique** (un port) au-dessus de plusieurs
+proxies existants, chacun gardant ses propres identifiants. Le pool n'est pas
+un uplink : il ne crée jamais de route, il n'a pas de machine à états (un
+simple `enabled`, l'écoute est réalignée par la réconciliation) et il ne
+**contourne jamais l'isolation d'un proxy** — le trafic sort toujours par le
+proxy 3proxy membre relais. Contrat détaillé : `docs/proxy-pools.md`.
+
+**Couches :**
+
+- `domain/proxy_pool.py` : `ProxyPool`, `PoolMember`, plage de ports dédiée
+  `POOL_PORT_START=31301` / `POOL_PORT_END=31399` (disjointe de la plage des
+  proxies).
+- `domain/pool_selection.py` : `pick_candidate` (sélection pure, en mémoire).
+- `domain/proxy_auth.py` : Basic auth du client face aux identifiants du pool
+  (comparaison constante, `hmac.compare_digest`).
+- `domain/pool_listen.py` : `PoolRuntime` / `PoolListenStatus` (état
+  d'écoute, sans identifiants).
+- `repositories/pool_repository.py` : persistance des tables
+  `proxy_pools` / `proxy_pool_members`.
+- `services/pool_ports.py` : `PoolPortAllocator` (plus petit port libre de la
+  plage, ignorant les ports déjà pris par un pool, un proxy, ou publiés par
+  Docker).
+- `services/pool_membership.py` : éligibilité des membres et production des
+  candidats de sélection.
+- `services/pool_service.py` : cas d'usage des pools + `sync_gateway`.
+- `services/pool_gateway.py` (+ `pool_http.py`, `pool_relay.py`,
+  `pool_session.py`) : le gateway HTTP proxy à l'écoute dans le processus API,
+  qui relaie vers un membre (parsing/écriture pure, splicing brut, service
+  d'une connexion dans `pool_session.py`).
+- `api/routers/pools.py` : routes (sérialisation seulement).
+- `frontend/src/features/pools/` : interface UI.
+
+**Éligibilité d'un membre** (7 règles, ordre fixe, une seule raison de refus —
+la première qui s'applique) :
+
+1. le proxy existe (`proxy absent`) ;
+2. le proxy est activé (`proxy désactivé`) ;
+3. `proxy.state == RUNNING` (`proxy non démarré (state=…)`);
+4. `proxy.network_ip` connu (`adresse interne inconnue`) ;
+5. les identifiants du proxy sont déchiffrables
+   (`identifiants non récupérables`) ;
+6. pour un proxy `DONGLE` : le dongle existe, n'est ni `RESETTING` ni sous le
+   verrou de reset (`dongle absent`, `dongle en reset`) ;
+7. pour un proxy `DONGLE` : état du dongle `ONLINE` ou `DEGRADED`
+   (`dongle non connecté (state=…)`).
+
+Un proxy `LOCAL` (uplink local) n'a pas de contrôle dongle (pas de reset) :
+il est éligible dès qu'il est activé, `RUNNING` et que ses identifiants sont
+déchiffrables.
+
+**Sélection par connexion :** le membre éligible qui a le moins de connexions
+en cours, puis le moins récemment utilisé (`last_used`), puis l'ordre stable
+`str(proxy_id)`. Un pool sans membre éligible ne se rabat **jamais** sur un
+membre non éligible : la connexion est refusée (`502`).
+
+**Synchronisation :** `PoolService.sync_gateway()` est appelée au démarrage
+(`main`), à chaque cycle du worker de réconciliation et après chaque écriture
+de pool (création, mise à jour, suppression). Elle ne lève jamais d'exception
+(les erreurs sont journalisées) et est sérialisée côté gateway (verrou de
+synchronisation single-flight) : un pool activé sans identifiants
+exploitables n'est **jamais** exposé (un pool actif ne doit jamais être un
+proxy ouvert).
+
 ## Identity Strategy
 
 Dongles are identified by a stable hardware identity, in order of preference:

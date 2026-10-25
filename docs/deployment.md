@@ -14,6 +14,14 @@ Broxy4G requires the following software to be installed on the host system:
 - platform-tools (`adb` binary), **only if Android smartphones are used**
   (transport `adb`) — see the ADB section below
 
+### Network ports (proxies, pools, API)
+
+If **proxy pools** are used (see `docs/proxy-pools.md`), their dedicated port
+range `31301-31399` must be reachable from the clients: the pool port is
+published on the **same listen interface as the proxies**
+(`proxy.listen_interface`, default `0.0.0.0`). Account for it in the host
+firewall, exactly like the proxy range `31201-31299` and the API port `8080`.
+
 ## One-shot Install (recommended)
 
 On a fresh machine you can run the single idempotent install script from the
@@ -603,6 +611,13 @@ docker buildx build --platform linux/arm64 -t broxy4g:local .
 | BROXY4G_RESET_WINDOW_SECONDS | Length in seconds of the sliding window used by the per-dongle reset cap. Invalid or negative values fall back to the default | 600 |
 | BROXY4G_ALLOW_QUERY_AUTH | Opt-in: allow API auth via query string (`?user=…&password=…`) for GET-only external tools; accepted values `1`/`true`/`yes`/`on` (case-insensitive) | false (fail-closed) |
 
+> **Proxy pools:** no additional variable is required for pools. The pool
+> password is encrypted at rest with the **same** `BROXY4G_PROXY_KEY` key as
+> the proxy passwords. When that key is unavailable (invalid variable, or
+> missing/unreadable persisted key file), pool creation fails with
+> `409 Conflict` — fail-closed: no pool row is written, and a pool without
+> usable credentials is never exposed.
+
 ## Security Notes
 
 ### API Security
@@ -666,6 +681,11 @@ Docker cleanup failed), the reconciliation worker detects it on every run
 and deletes it. The provisioning service also clears a stale proxy sharing
 the same `source_ref` (IMEI) before creating a new one, so re-enrolling the
 same dongle never fails on the `UNIQUE(source_type, source_ref)` constraint.
+
+**Pools orphelins.** Les membres de pool pointant vers un proxy supprimé sont
+purés à chaque cycle de réconciliation (`PoolService.prune_members`) : la
+suppression d'un proxy ne laisse donc pas derrière lui de membre mort dans un
+pool.
 
 ### Temporary Files
 
