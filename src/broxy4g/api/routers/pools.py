@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.responses import PlainTextResponse
 
 from broxy4g.api.deps import get_pool_service, require_auth
 from broxy4g.api.schemas.pool import (
@@ -38,6 +39,7 @@ def _detail(status: PoolStatus) -> PoolDetail:
     members = [
         PoolMemberStatus(
             proxy_id=m.proxy_id,
+            label=m.label,
             eligible=m.eligible,
             reason=m.reason,
             target=f"{m.candidate.host}:{m.candidate.port}" if m.eligible and m.candidate else None,
@@ -154,6 +156,24 @@ async def pool_status(pool_id: UUID, svc: PoolService = Depends(get_pool_service
     """Alias contractuel de ``GET /pools/{pool_id}`` (même agrégat)."""
     with _errors():
         return _detail(await svc.status(pool_id))
+
+
+@router.get("/pools/{pool_id}/available", response_class=PlainTextResponse)
+async def pool_available_labels(
+    pool_id: UUID, svc: PoolService = Depends(get_pool_service)
+):
+    """Labels des proxies éligibles, un par ligne ; corps vide si aucun.
+
+    Contrat pour les outils externes : ``text/plain``, HTTP 200, aucun JSON,
+    aucun identifiant technique, aucune ligne vide parasite. Un pool sans membre
+    éligible renvoie un corps vide (jamais une erreur) pour que l'appelant
+    distingue « rien de disponible » de « pool inconnu » (404).
+    """
+    with _errors():
+        labels = await svc.available_labels(pool_id)
+    return PlainTextResponse(
+        "\n".join(labels), headers={"Cache-Control": "no-store"}
+    )
 
 
 @router.get("/pools/{pool_id}/credentials", response_model=PoolWithPassword)

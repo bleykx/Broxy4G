@@ -186,6 +186,20 @@ class PoolService:
         """Statut de chaque pool, dans l'ordre de :meth:`list_all`."""
         return [await self.status(pool.id) for pool in await self.list_all()]
 
+    async def available_labels(self, pool_id: UUID) -> list[str]:
+        """Labels des membres éligibles, dans l'ordre stable des membres du pool.
+
+        Liste vide si aucun membre n'est éligible (pool debout mais inutilisable).
+        :class:`PoolNotFound` si le pool n'existe pas.
+        """
+        await self.get(pool_id)
+        evaluations = await self._membership.evaluate(pool_id)
+        return [
+            evaluation.label
+            for evaluation in evaluations
+            if evaluation.eligible and evaluation.label
+        ]
+
     async def sync_gateway(self) -> None:
         """Réaligne l'écoute sur les pools activés et identifiés (jamais d'exception).
 

@@ -139,6 +139,7 @@ export interface ProxyListenInterfaceSetting {
 
 export interface PoolMemberStatus {
   proxy_id: string;
+  label: string | null;
   eligible: boolean;
   reason: string | null;
   target: string | null;

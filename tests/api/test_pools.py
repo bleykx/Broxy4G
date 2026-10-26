@@ -197,3 +197,58 @@ async def test_pool_admin_routes_are_authenticated(client, method):
     else:
         response = await client.post(POOLS, json={"label": "Prod"})
     assert response.status_code == 401
+
+
+async def _add_member(client, auth_headers, pool_id, proxy_id) -> None:
+    response = await client.post(
+        f"{POOLS}/{pool_id}/members", json={"proxy_id": str(proxy_id)}, headers=auth_headers
+    )
+    assert response.status_code in (200, 201), response.text
+
+
+async def test_available_labels_is_plain_text_of_eligible_labels(
+    app, client, auth_headers
+):
+    """``/available`` : labels des membres éligibles, un par ligne, rien d'autre."""
+    pool_id = (await _create_pool(client, auth_headers))["pool"]["id"]
+    url = f"{POOLS}/{pool_id}/available"
+
+    empty = await client.get(url, headers=auth_headers)
+    assert empty.status_code == 200
+    assert empty.text == ""
+    assert empty.headers["content-type"].startswith("text/plain")
+    assert empty.headers["cache-control"] == "no-store"
+
+    dongle = Dongle(
+        identity=IdentityMaterial(imei="123456789012345"),
+        label="Dongle A",
+        state=DongleState.ONLINE,
+    )
+    await app.state.dongle_repo.save(dongle)
+    eligible = await _save_proxy(
+        app,
+        dongle_id=dongle.id,
+        state=ProxyState.RUNNING,
+        network_ip="172.28.0.5",
+        auth_user="member",
+        password_encrypted=app.state.proxy_secret_box.encrypt("sesame"),
+    )
+    stopped = await _save_proxy(app, listen_port=31202)
+    await _add_member(client, auth_headers, pool_id, eligible.id)
+    await _add_member(client, auth_headers, pool_id, stopped.id)
+
+    response = await client.get(url, headers=auth_headers)
+    assert response.status_code == 200
+    assert response.text == "Dongle A"
+    assert "sesame" not in response.text
+
+    detail = (await client.get(f"{POOLS}/{pool_id}", headers=auth_headers)).json()
+    labels = {m["label"] for m in detail["members"]}
+    assert labels == {"Dongle A", None}
+
+
+async def test_available_labels_requires_auth_and_known_pool(client, auth_headers):
+    pool_id = (await _create_pool(client, auth_headers))["pool"]["id"]
+    assert (await client.get(f"{POOLS}/{pool_id}/available")).status_code == 401
+    missing = await client.get(f"{POOLS}/{uuid4()}/available", headers=auth_headers)
+    assert missing.status_code == 404

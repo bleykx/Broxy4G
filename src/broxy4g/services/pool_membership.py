@@ -32,13 +32,18 @@ class MemberEvaluation:
     eligible: bool
     reason: str | None
     candidate: PoolCandidate | None
+    # Nom lisible du membre : label du dongle, ou nom d'interface pour un uplink
+    # local. Jamais un identifiant technique quand un nom existe.
+    label: str | None = None
 
 
-def _excluded(proxy_id: UUID, reason: str) -> MemberEvaluation:
-    return MemberEvaluation(proxy_id=proxy_id, eligible=False, reason=reason, candidate=None)
+def _excluded(proxy_id: UUID, reason: str, label: str | None = None) -> MemberEvaluation:
+    return MemberEvaluation(
+        proxy_id=proxy_id, eligible=False, reason=reason, candidate=None, label=label
+    )
 
 
-def _included(proxy: Proxy, password: str) -> MemberEvaluation:
+def _included(proxy: Proxy, password: str, label: str) -> MemberEvaluation:
     """Candidat éligible : ``network_ip`` et ``auth_user`` vérifiés non vides avant."""
     candidate = PoolCandidate(
         proxy_id=proxy.id,
@@ -47,7 +52,9 @@ def _included(proxy: Proxy, password: str) -> MemberEvaluation:
         username=proxy.auth_user,
         password=password,
     )
-    return MemberEvaluation(proxy_id=proxy.id, eligible=True, reason=None, candidate=candidate)
+    return MemberEvaluation(
+        proxy_id=proxy.id, eligible=True, reason=None, candidate=candidate, label=label
+    )
 
 
 class PoolMembershipService:
@@ -87,17 +94,18 @@ class PoolMembershipService:
             proxy = await self._proxy_repo.get_by_id(proxy_id)
             if proxy is None:
                 return _excluded(proxy_id, "proxy absent")
+            label = proxy.source_ref  # uplink local : nom d'interface
             if not proxy.enabled:
-                return _excluded(proxy_id, "proxy désactivé")
+                return _excluded(proxy_id, "proxy désactivé", label)
             if proxy.state is not ProxyState.RUNNING:
-                return _excluded(proxy_id, f"proxy non démarré (state={proxy.state.value})")
+                return _excluded(proxy_id, f"proxy non démarré (state={proxy.state.value})", label)
             if not proxy.network_ip:
-                return _excluded(proxy_id, "adresse interne inconnue")
+                return _excluded(proxy_id, "adresse interne inconnue", label)
             password = self._secret_box.decrypt(proxy.password_encrypted)
             if password is None or not proxy.auth_user:
-                return _excluded(proxy_id, "identifiants non récupérables")
+                return _excluded(proxy_id, "identifiants non récupérables", label)
             if proxy.source_type is ProxySource.LOCAL:
-                return _included(proxy, password)
+                return _included(proxy, password, label or str(proxy.id))
             return await self._evaluate_dongle(proxy, password)
         except Exception:  # un membre cassé ne doit pas casser l'évaluation
             logger.exception("Membre %s illisible : exclu du pool", proxy_id)
@@ -106,7 +114,7 @@ class PoolMembershipService:
     async def _evaluate_dongle(self, proxy: Proxy, password: str) -> MemberEvaluation:
         dongle = await self._dongle_repo.get_by_id(proxy.dongle_id) if proxy.dongle_id else None
         if dongle is None:
-            return _excluded(proxy.id, "dongle absent")
+            return _excluded(proxy.id, "dongle absent", proxy.source_ref)
         resetting = (
             dongle.state is DongleState.RESETTING
             or (
@@ -115,7 +123,9 @@ class PoolMembershipService:
             )
         )
         if resetting:
-            return _excluded(proxy.id, "dongle en reset")
+            return _excluded(proxy.id, "dongle en reset", dongle.label)
         if dongle.state not in (DongleState.ONLINE, DongleState.DEGRADED):
-            return _excluded(proxy.id, f"dongle non connecté (state={dongle.state.value})")
-        return _included(proxy, password)
+            return _excluded(
+                proxy.id, f"dongle non connecté (state={dongle.state.value})", dongle.label
+            )
+        return _included(proxy, password, dongle.label)

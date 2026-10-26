@@ -6,6 +6,9 @@ from uuid import uuid4
 
 import pytest
 
+from broxy4g.domain.dongle import Dongle
+from broxy4g.domain.dongle_states import DongleState
+from broxy4g.domain.identity import IdentityMaterial
 from broxy4g.domain.proxy import Proxy, ProxySource, ProxyState
 from broxy4g.domain.proxy_pool import ProxyPool
 from broxy4g.services.pool_gateway_port import FakePoolGateway
@@ -243,3 +246,69 @@ async def test_concurrent_creations_get_distinct_ports(
     ports = {first[0].listen_port, second[0].listen_port}
     assert ports == {31301, 31302}
     assert len(await pool_repo.list_all()) == 2
+
+
+async def _dongle_proxy(proxy_repo, secret_box, dongle, port) -> Proxy:
+    """Proxy éligible adossé à un dongle (label = label du dongle)."""
+    return await proxy_repo.save(
+        Proxy(
+            dongle_id=dongle.id,
+            container_name=f"broxy4g-proxy-{dongle.id}",
+            listen_port=port,
+            state=ProxyState.RUNNING,
+            auth_user="member",
+            password_encrypted=secret_box.encrypt("secret"),
+            source_type=ProxySource.DONGLE,
+            enabled=True,
+            network_ip="172.28.0.5",
+        )
+    )
+
+
+async def test_available_labels_lists_only_eligible_members(
+    pool_repo, proxy_repo, fake_docker_compose, dongle_repo, secret_box, fake_reset_lock, pool_listen
+):
+    """Seuls les membres éligibles sont listés, dans l'ordre des membres du pool."""
+    svc, _ = _make(pool_repo, proxy_repo, fake_docker_compose, dongle_repo, secret_box, fake_reset_lock, pool_listen)
+    pool, _ = await svc.create("Prod")
+    online = Dongle(
+        identity=IdentityMaterial(imei="351234567890123"),
+        label="Dongle A",
+        state=DongleState.ONLINE,
+    )
+    offline = Dongle(
+        identity=IdentityMaterial(imei="351234567890124"),
+        label="Dongle B",
+        state=DongleState.OFFLINE,
+    )
+    await dongle_repo.save(online)
+    await dongle_repo.save(offline)
+    alive = await _dongle_proxy(proxy_repo, secret_box, online, 31211)
+    down = await _dongle_proxy(proxy_repo, secret_box, offline, 31212)
+    await svc.add_member(pool.id, alive.id)
+    await svc.add_member(pool.id, down.id)
+
+    assert await svc.available_labels(pool.id) == ["Dongle A"]
+
+
+async def test_available_labels_empty_without_eligible_member(
+    pool_repo, proxy_repo, fake_docker_compose, dongle_repo, secret_box, fake_reset_lock, pool_listen
+):
+    """Pool sans membre, ou membres tous exclus : liste vide (le pool reste debout)."""
+    svc, _ = _make(pool_repo, proxy_repo, fake_docker_compose, dongle_repo, secret_box, fake_reset_lock, pool_listen)
+    pool, _ = await svc.create("Prod")
+    assert await svc.available_labels(pool.id) == []
+
+    stopped = await _eligible_local_proxy(proxy_repo, secret_box)
+    stopped.state = ProxyState.STOPPED
+    await proxy_repo.save(stopped)
+    await svc.add_member(pool.id, stopped.id)
+    assert await svc.available_labels(pool.id) == []
+
+
+async def test_available_labels_unknown_pool(
+    pool_repo, proxy_repo, fake_docker_compose, dongle_repo, secret_box, fake_reset_lock, pool_listen
+):
+    svc, _ = _make(pool_repo, proxy_repo, fake_docker_compose, dongle_repo, secret_box, fake_reset_lock, pool_listen)
+    with pytest.raises(PoolNotFound):
+        await svc.available_labels(uuid4())

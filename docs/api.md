@@ -911,6 +911,7 @@ pool's plaintext password is only returned at creation
 | POST | `/api/v1/pools/{pool_id}/members` | add a member (`proxy_id`) |
 | DELETE | `/api/v1/pools/{pool_id}/members/{proxy_id}` | remove a member |
 | GET | `/api/v1/pools/{pool_id}/status` | contractual alias of `GET /api/v1/pools/{pool_id}` (same aggregate) |
+| GET | `/api/v1/pools/{pool_id}/available` | plain-text labels of the eligible members (empty when none) |
 | GET | `/api/v1/pools/{pool_id}/credentials` | pool credentials (`no-store`, logged) |
 
 All pool responses except the credentials route carry the `PoolDetail` object:
@@ -921,11 +922,14 @@ All pool responses except the credentials route carry the `PoolDetail` object:
   "enabled": true, "created_at": "…", "updated_at": "…",
   "listening": true, "bind_ip": "192.168.1.10", "listen_error": null,
   "published_ip": "192.168.1.10", "endpoint": "192.168.1.10:31301",
-  "members": [{"proxy_id": "…", "eligible": true, "reason": null, "target": "172.28.0.5:3128"}],
+  "members": [{"proxy_id": "…", "label": "Dongle A", "eligible": true, "reason": null, "target": "172.28.0.5:3128"}],
   "eligible_count": 1
 }
 ```
 
+- `label` is the member's human name: the dongle label, or the host interface
+  name for a `LOCAL` uplink. `null` only when the member cannot be resolved at
+  all (`proxy absent`).
 - `endpoint` is the `ip:port` to communicate to clients (`null` when the port
   is not published, e.g. the listen interface is absent — the error then shows
   in `listen_error`).
@@ -1053,6 +1057,35 @@ Removes a proxy from the pool.
 
 Contractual alias of `GET /api/v1/pools/{pool_id}`: same `PoolDetail`
 aggregate, with the listening state and member eligibility evaluated live.
+
+#### Get Available Member Labels
+
+**GET** `/api/v1/pools/{pool_id}/available`
+
+Minimal contract for external tools: the labels of the members that are
+eligible **right now**, one per line, as `text/plain`. No JSON, no identifier,
+no secret. The eligibility rules are the same seven as in `PoolDetail`
+(`docs/architecture.md`), so the list is exactly the set of members the pool
+port would accept this instant — it is a snapshot, not a subscription.
+
+**Response** (`200 OK`, `Content-Type: text/plain; charset=utf-8`,
+`Cache-Control: no-store`)
+```text
+Dongle A
+Dongle C
+```
+
+- **No eligible member** (empty pool, all members stopped/offline, dongles
+  resetting, credentials not recoverable): `200 OK` with an **empty body**
+  (`Content-Length: 0`). This is deliberately not an error: the tool must be
+  able to tell "nothing available" (`200`, empty) apart from "unknown pool"
+  (`404`).
+- One member per line, no trailing newline, no blank line, no header line.
+- Order is the pool's stable member order (insertion order), not a ranking.
+- A `label` never contains a newline (labels are single-line strings), so
+  splitting on `\n` is safe.
+- While a dongle resets, its member disappears from this list immediately and
+  reappears on the first call after the reset is `DONE`.
 
 #### Get Pool Credentials
 

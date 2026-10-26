@@ -18,6 +18,7 @@ class PoolMemberAdd(BaseModel):
 
 class PoolMemberStatus(BaseModel):
     proxy_id: UUID
+    label: str | None  # label du dongle, ou nom d'interface pour un uplink local
     eligible: bool
     reason: str | None
     target: str | None  # "host:port" du membre si éligible, sinon None

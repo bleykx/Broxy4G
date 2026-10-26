@@ -54,7 +54,7 @@ export const PoolMembers: React.FC<PoolMembersProps> = ({ pool, proxies, busy, o
         <ul className="pool-members">
           {pool.members.map(m => (
             <li key={m.proxy_id} className={`pool-member ${m.eligible ? '' : 'pool-member-ineligible'}`}>
-              <span className="mono">{shortId(m.proxy_id)}</span>
+              <span className="mono" title={m.proxy_id}>{m.label ?? shortId(m.proxy_id)}</span>
               <span className="pool-member-detail">
                 {m.eligible ? (m.target ?? 'éligible') : (m.reason ?? 'non éligible')}
               </span>
