@@ -1086,6 +1086,10 @@ Dongle C
   splitting on `\n` is safe.
 - While a dongle resets, its member disappears from this list immediately and
   reappears on the first call after the reset is `DONE`.
+- Same authentication options as every other route: the `Authorization: Basic`
+  header, or the opt-in query auth `?user=<user>&password=<password>` when
+  `BROXY4G_ALLOW_QUERY_AUTH` is enabled (exactly like the GET reset URL), so a
+  GET-only tool can poll it with a single link.
 
 #### Get Pool Credentials
 

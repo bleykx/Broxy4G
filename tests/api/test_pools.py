@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytest
 
+from broxy4g.api.auth import QUERY_AUTH_ENV
 from broxy4g.domain.dongle import Dongle
 from broxy4g.domain.dongle_states import DongleState
 from broxy4g.domain.identity import IdentityMaterial
@@ -252,3 +253,24 @@ async def test_available_labels_requires_auth_and_known_pool(client, auth_header
     assert (await client.get(f"{POOLS}/{pool_id}/available")).status_code == 401
     missing = await client.get(f"{POOLS}/{uuid4()}/available", headers=auth_headers)
     assert missing.status_code == 404
+
+
+async def test_available_labels_accepts_query_auth(app, client, auth_headers, monkeypatch):
+    """Outil GET-only : l'URL fonctionne avec ``?user=&password=`` (opt-in)."""
+    monkeypatch.setenv(QUERY_AUTH_ENV, "true")
+    pool_id = (await _create_pool(client, auth_headers))["pool"]["id"]
+
+    response = await client.get(f"{POOLS}/{pool_id}/available?user=admin&password=test-pass")
+
+    assert response.status_code == 200
+    assert response.text == ""
+    assert response.headers["content-type"].startswith("text/plain")
+
+
+async def test_available_labels_query_auth_disabled_by_default(client, auth_headers, monkeypatch):
+    monkeypatch.delenv(QUERY_AUTH_ENV, raising=False)
+    pool_id = (await _create_pool(client, auth_headers))["pool"]["id"]
+
+    response = await client.get(f"{POOLS}/{pool_id}/available?user=admin&password=test-pass")
+
+    assert response.status_code == 401
